@@ -1702,6 +1702,10 @@ void G_DisplayLogo(void)
 {
     int32_t const logoflags = G_GetLogoFlags();
 
+#ifdef DUKEVR_OPENXR
+    LOG_F(INFO, "OpenXR G_DisplayLogo begin");
+#endif
+
     ready2send = 0;
 
     I_ClearAllInput();
@@ -1786,6 +1790,10 @@ void G_DisplayLogo(void)
 
     //G_FadePalette(0,0,0,0);
     videoClearScreen(0L);
+
+#ifdef DUKEVR_OPENXR
+    LOG_F(INFO, "OpenXR G_DisplayLogo end");
+#endif
 }
 
 #ifndef EDUKE32_STANDALONE

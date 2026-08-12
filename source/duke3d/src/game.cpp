@@ -44,6 +44,10 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include "sbar.h"
 #include "screens.h"
 
+#ifdef DUKEVR_OPENXR
+#include "dukevr_openxr.h"
+#endif
+
 #ifdef __ANDROID__
 #include "android.h"
 #endif
@@ -6042,6 +6046,9 @@ void G_Shutdown(void)
     S_MusicShutdown();
     CONTROL_Shutdown();
     KB_Shutdown();
+#ifdef DUKEVR_OPENXR
+    DukeVROpenXR_Shutdown();
+#endif
     engineUnInit();
     G_Cleanup();
     FreeGroups();
@@ -6437,6 +6444,345 @@ void G_MaybeAllocPlayer(int32_t pnum)
 EDUKE32_STATIC_ASSERT(sizeof(actor_t)%4 == 0);
 EDUKE32_STATIC_ASSERT(sizeof(DukePlayer_t)%4 == 0);
 
+#ifdef DUKEVR_OPENXR
+struct DukeVRPlayerViewState
+{
+    vec3_t pos, opos;
+    fix16_t q16ang, oq16ang;
+    fix16_t q16horiz, q16horizoff, oq16horiz, oq16horizoff;
+    int16_t rotscrnang, orotscrnang;
+};
+
+static int g_dukeVrTrackingOriginSet;
+static float g_dukeVrTrackingOrigin[3];
+static float g_dukeVrTrackingYawOrigin;
+static float g_dukeVrTrackingPitchOrigin;
+static float g_dukeVrTrackingRollOrigin;
+static float g_dukeVrTrackingOrientationOrigin[4];
+static float g_dukeVrTrackingYaw;
+static float g_dukeVrTrackingPitch;
+static float g_dukeVrTrackingRoll;
+
+/* OpenXR LOCAL positions are expressed in the runtime's fixed room basis.
+ * Legacy DukeVR recentered that basis before using eye/head translations.
+ * Rotate vectors back through the initial head pose to reproduce that
+ * recentered coordinate space, including the small initial pitch/roll. */
+static void DukeVRRecenterTrackingVector(float const source[3], float result[3])
+{
+    float const qx = -g_dukeVrTrackingOrientationOrigin[0];
+    float const qy = -g_dukeVrTrackingOrientationOrigin[1];
+    float const qz = -g_dukeVrTrackingOrientationOrigin[2];
+    float const qw = g_dukeVrTrackingOrientationOrigin[3];
+    float const tx = 2.f * (qy * source[2] - qz * source[1]);
+    float const ty = 2.f * (qz * source[0] - qx * source[2]);
+    float const tz = 2.f * (qx * source[1] - qy * source[0]);
+
+    result[0] = source[0] + qw * tx + qy * tz - qz * ty;
+    result[1] = source[1] + qw * ty + qz * tx - qx * tz;
+    result[2] = source[2] + qw * tz + qx * ty - qy * tx;
+}
+
+static void DukeVRGetEulerAngles(float const q[4], float *yaw, float *pitch, float *roll)
+{
+    double const test = q[0] * q[1] + q[2] * q[3];
+
+    if (test > 0.4993)
+    {
+        *yaw = (float)-2.0 * atan2(q[0], q[3]);
+        *pitch = (float)PI * 0.5f;
+        *roll = 0.f;
+        return;
+    }
+    if (test < -0.4993)
+    {
+        *yaw = (float)2.0 * atan2(q[0], q[3]);
+        *pitch = (float)-PI * 0.5f;
+        *roll = 0.f;
+        return;
+    }
+
+    double const sqx = q[0] * q[0];
+    double const sqy = q[1] * q[1];
+    double const sqz = q[2] * q[2];
+    float const eulerX = (float)atan2(2.0 * q[1] * q[3] - 2.0 * q[0] * q[2],
+        1.0 - 2.0 * sqy - 2.0 * sqz);
+    float const eulerY = (float)asin(clamp(2.0 * test, -1.0, 1.0));
+    float const eulerZ = (float)atan2(2.0 * q[0] * q[3] - 2.0 * q[1] * q[2],
+        1.0 - 2.0 * sqx - 2.0 * sqz);
+
+    /* Keep the same handedness and Duke conventions as the legacy port. */
+    *yaw = -eulerX;
+    *pitch = eulerZ;
+    *roll = -eulerY;
+}
+
+static void DukeVRSavePlayerView(DukePlayer_t const *p, DukeVRPlayerViewState *state)
+{
+    state->pos = p->pos;
+    state->opos = p->opos;
+    state->q16ang = p->q16ang;
+    state->oq16ang = p->oq16ang;
+    state->q16horiz = p->q16horiz;
+    state->q16horizoff = p->q16horizoff;
+    state->oq16horiz = p->oq16horiz;
+    state->oq16horizoff = p->oq16horizoff;
+    state->rotscrnang = p->rotscrnang;
+    state->orotscrnang = p->orotscrnang;
+}
+
+static void DukeVRRestorePlayerView(DukePlayer_t *p, DukeVRPlayerViewState const *state)
+{
+    p->pos = state->pos;
+    p->opos = state->opos;
+    p->q16ang = state->q16ang;
+    p->oq16ang = state->oq16ang;
+    p->q16horiz = state->q16horiz;
+    p->q16horizoff = state->q16horizoff;
+    p->oq16horiz = state->oq16horiz;
+    p->oq16horizoff = state->oq16horizoff;
+    p->rotscrnang = state->rotscrnang;
+    p->orotscrnang = state->orotscrnang;
+}
+
+static void DukeVRApplyPlayerView(DukePlayer_t *p, int eye,
+    float const eyeOrientation[2][4], float const eyePosition[2][3], float smoothratio)
+{
+    float centerRaw[3], center[3];
+    float eyeDeltaRaw[3], eyeDelta[3];
+    float const trackingYaw = g_dukeVrTrackingYaw;
+    float const trackingPitch = g_dukeVrTrackingPitch;
+    float const trackingRoll = g_dukeVrTrackingRoll;
+    float const baseYaw = (float)fix16_to_int(p->q16ang) * ((float)PI * (1.f / 1024.f));
+    float const basePitch = atanf((((float)p->q16horiz + (float)p->q16horizoff) / 65536.f - 100.f) / 128.f);
+    float const baseRoll = (float)p->rotscrnang * ((float)PI / 650.f);
+    float const targetPitch = fclamp(basePitch + trackingPitch, -(float)PI * .49f, (float)PI * .49f);
+    float const targetRoll = baseRoll - trackingRoll;
+    int32_t const yawUnits = (int32_t)floorf(trackingYaw * (1024.f / (float)PI) +
+        (trackingYaw >= 0.f ? .5f : -.5f));
+    int32_t const pitchValue = clamp((int32_t)floorf(tanf(targetPitch) * 128.f + 100.f + .5f), HORIZ_MIN, HORIZ_MAX);
+    int32_t const rollValue = clamp((int32_t)floorf(targetRoll * (650.f / (float)PI) + (targetRoll >= 0.f ? .5f : -.5f)), -650, 650);
+
+    (void)eyeOrientation;
+    (void)smoothratio;
+    centerRaw[0] = (eyePosition[0][0] + eyePosition[1][0]) * .5f - g_dukeVrTrackingOrigin[0];
+    centerRaw[1] = (eyePosition[0][1] + eyePosition[1][1]) * .5f - g_dukeVrTrackingOrigin[1];
+    centerRaw[2] = (eyePosition[0][2] + eyePosition[1][2]) * .5f - g_dukeVrTrackingOrigin[2];
+    DukeVRRecenterTrackingVector(centerRaw, center);
+
+    /* OpenXR is meters, while Build uses 512 units per meter horizontally
+     * and 8192 units per meter vertically. Match the exact axis mapping from
+     * the legacy DukeVR implementation, including the eye-depth component. */
+    {
+        /* Legacy DukeVR rotates the eye translation with the same quantized
+         * player angle used for the rendered view. The fractional yaw is
+         * applied separately by Polymer's residual path below. */
+        float const pang = -(baseYaw + (float)yawUnits * ((float)PI / 1024.f));
+        eyeDeltaRaw[0] = eyePosition[eye][0] - (eyePosition[0][0] + eyePosition[1][0]) * .5f;
+        eyeDeltaRaw[1] = eyePosition[eye][1] - (eyePosition[0][1] + eyePosition[1][1]) * .5f;
+        eyeDeltaRaw[2] = eyePosition[eye][2] - (eyePosition[0][2] + eyePosition[1][2]) * .5f;
+        DukeVRRecenterTrackingVector(eyeDeltaRaw, eyeDelta);
+        float const lateral = eyeDelta[0] * 512.f;
+        float const depth = -eyeDelta[2] * 512.f;
+        float const centerLateral = center[0] * 512.f;
+        float const centerDepth = -center[2] * 512.f;
+        float const dx = lateral * sinf(pang) + depth * sinf(pang + (float)PI * .5f) +
+            centerLateral * sinf(pang) + centerDepth * sinf(pang + (float)PI * .5f);
+        float const dy = lateral * cosf(pang) + depth * cosf(pang + (float)PI * .5f) +
+            centerLateral * cosf(pang) + centerDepth * cosf(pang + (float)PI * .5f);
+        float const dz = -(eyePosition[eye][1] - (eyePosition[0][1] + eyePosition[1][1]) * .5f) * 8192.f - center[1] * 8192.f;
+        int32_t const roundedDx = (int32_t)floorf(dx + (dx >= 0.f ? .5f : -.5f));
+        int32_t const roundedDy = (int32_t)floorf(dy + (dy >= 0.f ? .5f : -.5f));
+        int32_t const roundedDz = (int32_t)floorf(dz + (dz >= 0.f ? .5f : -.5f));
+
+        p->pos.x += roundedDx;
+        p->pos.y += roundedDy;
+        p->pos.z += roundedDz;
+        p->opos.x = p->pos.x;
+        p->opos.y = p->pos.y;
+        p->opos.z = p->pos.z;
+
+        /* Keep the integer Build state deterministic, but let Polymer add
+         * back the sub-unit part while constructing its floating-point view
+         * matrix. This matters for the small eye separation: rounding both
+         * eye positions independently can otherwise introduce a vergence
+         * error at close range. */
+        DukeVROpenXR_SetRenderPositionResidual(dx - (float)roundedDx,
+            dy - (float)roundedDy, dz - (float)roundedDz);
+
+        {
+            static int cameraTrace[2];
+            if (!cameraTrace[eye])
+            {
+                LOG_F(INFO, "OpenXR camera trace: eye=%d pang=%0.6f recenteredEye=%0.5f/%0.5f/%0.5f build=%0.3f/%0.3f/%0.3f residual=%0.3f/%0.3f/%0.3f",
+                    eye, pang, eyeDelta[0], eyeDelta[1], eyeDelta[2], dx, dy, dz,
+                    dx - (float)roundedDx, dy - (float)roundedDy,
+                    dz - (float)roundedDz);
+                cameraTrace[eye] = 1;
+            }
+        }
+    }
+
+    p->q16ang = p->oq16ang = fix16_from_int((fix16_to_int(p->q16ang) + yawUnits) & 2047);
+    p->q16horiz = p->oq16horiz = fix16_from_int(pitchValue);
+    p->q16horizoff = p->oq16horizoff = 0;
+    p->rotscrnang = p->orotscrnang = (int16_t)rollValue;
+
+    /* Match the legacy Polymer residual path. Build keeps integer angle
+     * fields for gameplay, while Polymer receives the fraction that was
+     * discarded so the rendered camera matches the OpenXR pose. */
+    {
+        float const quantizedYaw = (float)yawUnits * ((float)PI / 1024.f);
+        float const quantizedPitch = atanf(((float)pitchValue - 100.f) / 128.f);
+        float const targetRollUnits = targetRoll * (650.f / (float)PI);
+        float const quantizedTiltDegrees = (float)rollValue * ((float)PI * 90.f / 1024.f);
+        float const targetTiltDegrees = targetRollUnits * ((float)PI * 90.f / 1024.f);
+
+        DukeVROpenXR_SetRenderOrientationResidual(
+            trackingYaw - quantizedYaw,
+            quantizedPitch - targetPitch,
+            (targetTiltDegrees - quantizedTiltDegrees) * ((float)PI / 180.f));
+    }
+}
+
+static int DukeVRIsInGameMenu(MenuID_t menu)
+{
+    return menu == MENU_MAIN_INGAME || menu == MENU_COLCORR_INGAME ||
+        menu == MENU_QUIT_INGAME || menu == MENU_SOUND_INGAME;
+}
+
+static int DukeVRRenderStereoFrame(int smoothratio)
+{
+    float eyeOrientation[2][4];
+    float eyePosition[2][3];
+    DukePlayer_t *pPlayer = (screenpeek >= 0 && screenpeek < MAXPLAYERS) ? g_player[screenpeek].ps : nullptr;
+    DukeVRPlayerViewState saved;
+    int hudRendered = 0;
+
+    /* Front-end menus are still submitted as one mono desktop frame. The
+     * in-game menu is different: legacy DukeVR kept the world stereo and
+     * rendered the menu once into a head-locked HUD quad. */
+    const int inGameMenu = (pPlayer != nullptr && (pPlayer->gm & MODE_MENU)) &&
+        DukeVRIsInGameMenu(g_currentMenu);
+    if (pPlayer == nullptr || ((pPlayer->gm & MODE_MENU) && !inGameMenu) ||
+        (pPlayer->gm & (MODE_GAME | MODE_DEMO)) == 0)
+        return 0;
+
+    static int stereoFailureTrace;
+    if (!DukeVROpenXR_BeginFrame())
+    {
+        if (stereoFailureTrace < 12)
+        {
+            LOG_F(WARNING, "OpenXR stereo frame %d: BeginFrame failed", stereoFailureTrace);
+            stereoFailureTrace++;
+        }
+        return 0;
+    }
+    if (!DukeVROpenXR_GetEyePose(0, eyeOrientation[0], eyePosition[0]) ||
+        !DukeVROpenXR_GetEyePose(1, eyeOrientation[1], eyePosition[1]))
+    {
+        if (stereoFailureTrace < 12)
+        {
+            LOG_F(WARNING, "OpenXR stereo frame %d: eye pose unavailable", stereoFailureTrace);
+            stereoFailureTrace++;
+        }
+        DukeVROpenXR_EndFrame();
+        return 0;
+    }
+    DukeVROpenXR_SetHudMenuScale(inGameMenu);
+    DukeVROpenXR_SetRenderOrientationResidual(0.f, 0.f, 0.f);
+    DukeVROpenXR_SetRenderPositionResidual(0.f, 0.f, 0.f);
+
+    float headYaw, headPitch, headRoll;
+    DukeVRGetEulerAngles(eyeOrientation[0], &headYaw, &headPitch, &headRoll);
+    if (!g_dukeVrTrackingOriginSet)
+    {
+        g_dukeVrTrackingOrigin[0] = (eyePosition[0][0] + eyePosition[1][0]) * .5f;
+        g_dukeVrTrackingOrigin[1] = (eyePosition[0][1] + eyePosition[1][1]) * .5f;
+        g_dukeVrTrackingOrigin[2] = (eyePosition[0][2] + eyePosition[1][2]) * .5f;
+        g_dukeVrTrackingYawOrigin = headYaw;
+        g_dukeVrTrackingPitchOrigin = headPitch;
+        g_dukeVrTrackingRollOrigin = headRoll;
+        g_dukeVrTrackingOrientationOrigin[0] = eyeOrientation[0][0];
+        g_dukeVrTrackingOrientationOrigin[1] = eyeOrientation[0][1];
+        g_dukeVrTrackingOrientationOrigin[2] = eyeOrientation[0][2];
+        g_dukeVrTrackingOrientationOrigin[3] = eyeOrientation[0][3];
+        g_dukeVrTrackingOriginSet = 1;
+    }
+
+    float const trackingYaw = headYaw - g_dukeVrTrackingYawOrigin;
+    float const trackingPitch = headPitch - g_dukeVrTrackingPitchOrigin;
+    float const trackingRoll = headRoll - g_dukeVrTrackingRollOrigin;
+    g_dukeVrTrackingYaw = trackingYaw;
+    g_dukeVrTrackingPitch = trackingPitch;
+    g_dukeVrTrackingRoll = trackingRoll;
+
+    {
+        static int poseTrace;
+        if (!poseTrace)
+        {
+            LOG_F(INFO, "OpenXR pose trace: absolute=%0.6f/%0.6f/%0.6f tracking=%0.6f/%0.6f/%0.6f eye0=%0.6f/%0.6f/%0.6f eye1=%0.6f/%0.6f/%0.6f",
+                headYaw, headPitch, headRoll,
+                trackingYaw, trackingPitch, trackingRoll,
+                eyePosition[0][0], eyePosition[0][1], eyePosition[0][2],
+                eyePosition[1][0], eyePosition[1][1], eyePosition[1][2]);
+            poseTrace = 1;
+        }
+    }
+
+    DukeVRSavePlayerView(pPlayer, &saved);
+    for (int eye = 0; eye < 2; eye++)
+    {
+        if (!DukeVROpenXR_BeginEyeRender(eye))
+        {
+            LOG_F(WARNING, "OpenXR stereo eye %d: BeginEyeRender failed", eye);
+            DukeVRRestorePlayerView(pPlayer, &saved);
+            DukeVROpenXR_EndFrame();
+            return 0;
+        }
+        /* Keep Build's allocated logical render target at the desktop mirror
+         * size. The OpenXR bridge scales this complete scene target into the
+         * complete runtime eye image before submission. */
+        DukeVRApplyPlayerView(pPlayer, eye, eyeOrientation, eyePosition, (float)smoothratio);
+        G_DrawRooms(screenpeek, smoothratio);
+        if (videoGetRenderMode() >= REND_POLYMOST)
+            G_DrawBackground();
+        if (eye == 0 && DukeVROpenXR_BeginHudRender())
+        {
+            G_DisplayRest(smoothratio);
+            DukeVROpenXR_EndHudRender();
+            hudRendered = 1;
+        }
+        else if (!hudRendered)
+        {
+            /* If the auxiliary HUD target cannot be created, preserve the
+             * normal game view rather than silently dropping the interface. */
+            G_DisplayRest(smoothratio);
+        }
+        DukeVROpenXR_MarkSceneFrame();
+        videoNextPage();
+        DukeVROpenXR_EndEyeRender();
+        DukeVRRestorePlayerView(pPlayer, &saved);
+    }
+    DukeVRRestorePlayerView(pPlayer, &saved);
+    DukeVROpenXR_EndFrame();
+    {
+        static int loggedGameplayFrame;
+        static int loggedInGameMenuFrame;
+        if (!loggedGameplayFrame)
+        {
+            LOG_F(INFO, "OpenXR stereo gameplay frame submitted");
+            loggedGameplayFrame = 1;
+        }
+        if (inGameMenu && !loggedInGameMenuFrame)
+        {
+            LOG_F(INFO, "OpenXR in-game menu stereo frame submitted: menu=%d", g_currentMenu);
+            loggedInGameMenuFrame = 1;
+        }
+    }
+    return 1;
+}
+#endif
+
 #ifndef NETCODE_DISABLE
 void Net_DedicatedServerStdin(void)
 {
@@ -6493,19 +6839,34 @@ void drawframe_do(void)
 
     int const smoothratio = calc_smoothratio(totalclock, ototalclock);
 
-    G_DrawRooms(screenpeek, smoothratio);
+    int vrFrameRendered = 0;
+#ifdef DUKEVR_OPENXR
+    static int loggedGameplayState;
+    DukePlayer_t *framePlayer = (screenpeek >= 0 && screenpeek < MAXPLAYERS) ? g_player[screenpeek].ps : nullptr;
+    if (!loggedGameplayState && framePlayer && (framePlayer->gm & MODE_GAME) && !(framePlayer->gm & MODE_MENU))
+    {
+        LOG_F(INFO, "OpenXR gameplay state reached");
+        loggedGameplayState = 1;
+    }
+    vrFrameRendered = DukeVRRenderStereoFrame(smoothratio);
+#endif
+    if (!vrFrameRendered)
+    {
+        G_DrawRooms(screenpeek, smoothratio);
 
-    if (videoGetRenderMode() >= REND_POLYMOST)
-        G_DrawBackground();
+        if (videoGetRenderMode() >= REND_POLYMOST)
+            G_DrawBackground();
 
-    G_DisplayRest(smoothratio);
+        G_DisplayRest(smoothratio);
+    }
 
     g_frameJustDrawn = true;
     g_lastFrameEndTime = timerGetNanoTicks();
     g_lastFrameDuration = g_lastFrameEndTime - g_lastFrameStartTime;
     g_frameCounter++;
 
-    videoNextPage();
+    if (!vrFrameRendered)
+        videoNextPage();
     S_Update();
     g_lastFrameEndTime2 = timerGetNanoTicks();
     g_lastFrameDuration2 = g_lastFrameEndTime2 - g_lastFrameStartTime;
@@ -6728,6 +7089,14 @@ int app_main(int argc, char const* const* argv)
 
     G_ScanGroups();
 
+#ifdef DUKEVR_OPENXR
+    /* Initialize the instance before the native startup launcher. Keep the
+     * launcher's desktop dimensions: the headset swapchains are independent
+     * of the small mirror window. */
+    if (DukeVROpenXR_Initialize())
+        LOG_F(INFO, "OpenXR runtime available before startup launcher");
+#endif
+
 #ifdef STARTUP_SETUP_WINDOW
     if (g_commandSetup || (!Bgetenv("SteamTenfoot") && (readSetup < 0 || (!g_noSetup && (ud.configversion != BYTEVERSION_EDUKE32 || ud.setup.forcesetup)))))
     {
@@ -6917,6 +7286,17 @@ int app_main(int argc, char const* const* argv)
     system_getcvars();
 
     if (quitevent) app_exit(4);
+
+#ifdef DUKEVR_OPENXR
+    /* The desktop mode remains the mirror window. Eye render dimensions are
+     * applied temporarily around each offscreen eye render below. */
+    if (DukeVROpenXR_Initialize())
+    {
+        int xrWidth = 0, xrHeight = 0;
+        if (DukeVROpenXR_GetEyeDimensions(0, &xrWidth, &xrHeight) && xrWidth > 0 && xrHeight > 0)
+            LOG_F(INFO, "OpenXR eye render target available: %dx%d per eye", xrWidth, xrHeight);
+    }
+#endif
 
     if (g_networkMode != NET_DEDICATED_SERVER && validmodecnt > 0)
     {

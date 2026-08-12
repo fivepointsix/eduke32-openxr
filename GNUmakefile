@@ -23,7 +23,7 @@ o := o
 
 ### Directories
 source := source
-obj := obj
+obj := $(if $(OBJDIR),$(OBJDIR),obj)
 
 ### Functions
 # Some of this still needs work--"getfiltered" takes a list of files and strips the paths off of them,
@@ -527,6 +527,10 @@ ifneq (,$(APPBASENAME))
     duke3d_game := $(APPBASENAME)
 endif
 
+ifneq (,$(BINDIR))
+    duke3d_game := $(BINDIR)/$(duke3d_game)
+endif
+
 duke3d_game_proper := EDuke32
 duke3d_editor_proper := Mapster32
 
@@ -588,7 +592,10 @@ ifeq ($(PLATFORM),DARWIN)
 endif
 
 ifeq ($(PLATFORM),WINDOWS)
-    LIBS += -lFLAC -ldsound
+    ifneq (0,$(HAVE_FLAC))
+        LIBS += -lFLAC
+    endif
+    LIBS += -ldsound -ldwmapi
     duke3d_game_objs += winbits.cpp
     duke3d_game_rsrc_objs += gameres.rc
     duke3d_editor_rsrc_objs += buildres.rc
@@ -779,8 +786,8 @@ define BUILDRULE
 
 $$($1_$2)$$(EXESUFFIX): $$(foreach i,$(call getdeps,$1,$2),$$(call expandobjs,$$i)) $$($1_$2_miscdeps) | $$($1_$2_orderonlydeps)
 	$$(LINK_STATUS)
-	$$(call MKDIR,"$$(obj)/$$($1_$2)_dump")
-	$$(RECIPE_IF) $$(LINKER) $$(call LF,$$(obj)/$$($1_$2)_dump) -o $$@ $$^ $$(GUI_LIBS) $$($1_$2_ldflags) $$(LIBDIRS) $$(LIBS) $$(RECIPE_RESULT_LINK)
+	$$(call MKDIR,"$$(obj)/$$(notdir $$($1_$2))_dump")
+	$$(RECIPE_IF) $$(LINKER) $$(call LF,$$(obj)/$$(notdir $$($1_$2))_dump) -o $$@ $$^ $$(GUI_LIBS) $$($1_$2_ldflags) $$(LIBDIRS) $$(LIBS) $$(RECIPE_RESULT_LINK)
 ifeq ($$(PLATFORM),WII)
 ifneq ($$(ELF2DOL),)
 	$$(ELF2DOL) $$@ $$($1_$2)$$(DOLSUFFIX)
@@ -794,7 +801,7 @@ ifeq ($$(PLATFORM),DARWIN)
 	$(call MKDIR,"$$($1_$2_proper).app/Contents/MacOS")
 	cp -f "$$($1_$2)$$(EXESUFFIX)" "$$($1_$2_proper).app/Contents/MacOS/"
 endif
-	$$(call RMDIR,"$$(obj)/$$($1_$2)_dump")
+	$$(call RMDIR,"$$(obj)/$$(notdir $$($1_$2))_dump")
 
 endef
 

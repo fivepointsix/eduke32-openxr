@@ -1,0 +1,328 @@
+[CmdletBinding()]
+param(
+    [ValidateSet('OpenXR', 'Desktop')]
+    [string]$Mode = 'OpenXR',
+    [switch]$Build,
+    [ValidateRange(5, 600)]
+    [int]$TimeoutSeconds = 60,
+    [ValidateRange(1, 20)]
+    [int]$Repeat = 1,
+    [switch]$EnterMission,
+    [switch]$StartMission,
+    [switch]$KeepRunning,
+    [string[]]$GameArguments = @('-nosetup'),
+    [string]$BuildRoot
+)
+
+$ErrorActionPreference = 'Stop'
+
+$projectRoot = (Resolve-Path (Join-Path $PSScriptRoot '.')).Path
+if ([string]::IsNullOrWhiteSpace($BuildRoot)) {
+    $BuildRoot = if ($env:DUKEVR_BUILD_ROOT) {
+        $env:DUKEVR_BUILD_ROOT
+    }
+    else {
+        Join-Path (Split-Path $projectRoot -Parent) 'dukevr-build'
+    }
+}
+$buildRoot = [IO.Path]::GetFullPath($BuildRoot)
+$executable = Join-Path $buildRoot 'eduke32.exe'
+$logFile = Join-Path $buildRoot 'eduke32.log'
+$resultsRoot = Join-Path $buildRoot 'test-results'
+$runtimeManifest = $null
+
+if ($Mode -eq 'OpenXR') {
+    $runtimeManifest = [Environment]::GetEnvironmentVariable('XR_RUNTIME_JSON', 'Process')
+    if ([string]::IsNullOrWhiteSpace($runtimeManifest)) {
+        try {
+            $runtimeManifest = (Get-ItemProperty -Path 'HKLM:\SOFTWARE\Khronos\OpenXR\1' -Name ActiveRuntime -ErrorAction Stop).ActiveRuntime
+        }
+        catch {
+            $runtimeManifest = $null
+        }
+    }
+}
+
+function ConvertTo-ProcessArgument([string]$Value) {
+    if ($Value -notmatch '[\s"]') {
+        return $Value
+    }
+
+    return '"' + $Value.Replace('"', '\"') + '"'
+}
+
+function Stop-TestProcess([Diagnostics.Process]$Process) {
+    if ($null -eq $Process) {
+        return
+    }
+
+    try {
+        $Process.Refresh()
+        if (-not $Process.HasExited) {
+            [void]$Process.CloseMainWindow()
+            if (-not $Process.WaitForExit(2000)) {
+                $Process.Kill()
+                [void]$Process.WaitForExit(5000)
+            }
+        }
+    }
+    catch {
+        Write-Warning "Could not stop test process $($Process.Id): $($_.Exception.Message)"
+    }
+}
+
+function Read-TestLog {
+    if (-not (Test-Path -LiteralPath $logFile)) {
+        return ''
+    }
+
+    try {
+        return Get-Content -LiteralPath $logFile -Raw -ErrorAction Stop
+    }
+    catch {
+        return ''
+    }
+}
+
+if ($EnterMission) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+
+public static class DukeVrTestInput {
+    [DllImport("user32.dll")]
+    public static extern bool SetForegroundWindow(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
+
+    [DllImport("user32.dll")]
+    public static extern bool PostMessage(IntPtr hWnd, uint msg, UIntPtr wParam, UIntPtr lParam);
+
+    public static bool PostKey(IntPtr hWnd, uint msg, byte key) {
+        return PostMessage(hWnd, msg, (UIntPtr)key, UIntPtr.Zero);
+    }
+
+    public const uint KEYEVENTF_KEYUP = 0x0002;
+    public const uint WM_KEYDOWN = 0x0100;
+    public const uint WM_KEYUP = 0x0101;
+}
+'@
+}
+
+if ($Build) {
+    & (Join-Path $projectRoot 'build_openxr.ps1') -BuildRoot $buildRoot
+    if ($LASTEXITCODE -ne 0) {
+        throw "Build failed with exit code $LASTEXITCODE"
+    }
+}
+
+if (-not (Test-Path -LiteralPath $executable)) {
+    throw "Executable was not found: $executable. Run with -Build first."
+}
+
+New-Item -ItemType Directory -Force -Path $resultsRoot | Out-Null
+
+$effectiveGameArguments = @($GameArguments)
+if ($StartMission -and $effectiveGameArguments -notcontains '-l1') {
+    $effectiveGameArguments += @('-l1', '-s1')
+}
+$argumentText = ($effectiveGameArguments | ForEach-Object { ConvertTo-ProcessArgument $_ }) -join ' '
+$allResults = @()
+
+for ($run = 1; $run -le $Repeat; $run++) {
+    $runStart = Get-Date
+    $runStamp = $runStart.ToString('yyyyMMdd-HHmmss')
+    $runDirectory = Join-Path $resultsRoot ("run-{0:D2}-{1}" -f $run, $runStamp)
+    New-Item -ItemType Directory -Force -Path $runDirectory | Out-Null
+
+    $beforeLog = Join-Path $runDirectory 'previous-eduke32.log'
+    if (Test-Path -LiteralPath $logFile) {
+        Copy-Item -LiteralPath $logFile -Destination $beforeLog -Force
+        Remove-Item -LiteralPath $logFile -Force
+    }
+
+    $samePathProcesses = Get-Process -Name 'eduke32' -ErrorAction SilentlyContinue |
+        Where-Object { $_.Path -and ([IO.Path]::GetFullPath($_.Path) -ieq $executable) }
+    if ($samePathProcesses) {
+        throw "A test executable is already running from $executable. Close it before starting another run."
+    }
+
+    $startInfo = New-Object Diagnostics.ProcessStartInfo
+    $startInfo.FileName = $executable
+    $startInfo.Arguments = $argumentText
+    $startInfo.WorkingDirectory = $buildRoot
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $false
+
+    if ($Mode -eq 'Desktop') {
+        $startInfo.EnvironmentVariables['DUKEVR_OPENXR_DISABLE'] = '1'
+    }
+    else {
+        [void]$startInfo.EnvironmentVariables.Remove('DUKEVR_OPENXR_DISABLE')
+        if (-not [string]::IsNullOrWhiteSpace($runtimeManifest) -and (Test-Path -LiteralPath $runtimeManifest)) {
+            $startInfo.EnvironmentVariables['XR_RUNTIME_JSON'] = $runtimeManifest
+        }
+    }
+
+    $process = New-Object Diagnostics.Process
+    $process.StartInfo = $startInfo
+    if (-not $process.Start()) {
+        throw "Could not start $executable"
+    }
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    $reachedLogoEnd = $false
+    $reachedMenu = $false
+    $reachedGameplay = $false
+    $reachedStereoGameplay = $false
+    $missionKeysSent = $false
+    $xrRuntimeInitialized = $false
+    $xrGraphicsInitialized = $false
+    $status = 'TimedOut'
+    $exitCode = $null
+
+    try {
+        while ($true) {
+            $logText = Read-TestLog
+            $reachedLogoEnd = $logText -match 'OpenXR G_DisplayLogo end'
+            $reachedMenu = $logText -match 'OpenXR main menu reached'
+            $reachedGameplay = $logText -match 'OpenXR gameplay state reached|OpenXR stereo gameplay frame submitted'
+            $reachedStereoGameplay = $logText -match 'OpenXR stereo gameplay frame submitted'
+            $xrRuntimeInitialized = $logText -match 'OpenXR runtime initialized:'
+            $xrGraphicsInitialized = $logText -match 'OpenXR graphics initialized:'
+
+            if ($EnterMission -and $reachedMenu -and -not $missionKeysSent) {
+                $process.Refresh()
+                if ($process.MainWindowHandle -eq [IntPtr]::Zero) {
+                    Start-Sleep -Milliseconds 500
+                    continue
+                }
+
+                [void][DukeVrTestInput]::SetForegroundWindow($process.MainWindowHandle)
+                Write-Host ("  Sending mission input to window 0x{0:X}" -f $process.MainWindowHandle.ToInt64())
+                Start-Sleep -Milliseconds 500
+                # Main menu -> New Game -> episode -> skill -> mission.
+                1..5 | ForEach-Object {
+                    [DukeVrTestInput]::keybd_event(0x0D, 0, 0, [UIntPtr]::Zero)
+                    [DukeVrTestInput]::keybd_event(0x0D, 0, [DukeVrTestInput]::KEYEVENTF_KEYUP, [UIntPtr]::Zero)
+                    [void][DukeVrTestInput]::PostKey($process.MainWindowHandle,
+                        [DukeVrTestInput]::WM_KEYDOWN, [byte]0x0D)
+                    [void][DukeVrTestInput]::PostKey($process.MainWindowHandle,
+                        [DukeVrTestInput]::WM_KEYUP, [byte]0x0D)
+                    Start-Sleep -Milliseconds 700
+                }
+                $missionKeysSent = $true
+            }
+
+            # The gameplay marker is emitted before the first stereo frame can
+            # finish. Keep polling in OpenXR mission tests so a normal startup
+            # race is not reported as a false ReachedGameplayWithoutStereo.
+            $waitingForStereo = $Mode -eq 'OpenXR' -and $StartMission -and
+                $reachedGameplay -and -not $reachedStereoGameplay
+            if ($reachedGameplay -and -not $KeepRunning -and -not $waitingForStereo) {
+                if ($Mode -eq 'OpenXR' -and (-not $xrRuntimeInitialized -or -not $xrGraphicsInitialized)) {
+                    $status = 'ReachedGameplayWithoutXR'
+                }
+                elseif ($Mode -eq 'OpenXR' -and -not $reachedStereoGameplay) {
+                    $status = 'ReachedGameplayWithoutStereo'
+                }
+                else {
+                    $status = 'ReachedGameplay'
+                }
+                break
+            }
+
+            if ($reachedMenu -and -not $KeepRunning -and -not $EnterMission -and -not $StartMission) {
+                if ($Mode -eq 'OpenXR' -and (-not $xrRuntimeInitialized -or -not $xrGraphicsInitialized)) {
+                    $status = 'ReachedMainMenuWithoutXR'
+                }
+                else {
+                    $status = 'ReachedMainMenu'
+                }
+                break
+            }
+
+            $process.Refresh()
+            if ($process.HasExited) {
+                $exitCode = $process.ExitCode
+                if ($reachedMenu -and $Mode -eq 'OpenXR' -and (-not $xrRuntimeInitialized -or -not $xrGraphicsInitialized)) {
+                    $status = 'ExitedAfterMainMenuWithoutXR'
+                }
+                else {
+                    $status = if ($reachedGameplay) { 'ExitedAfterGameplay' } elseif ($reachedMenu) { 'ExitedAfterMainMenu' } else { 'ExitedBeforeMainMenu' }
+                }
+                break
+            }
+
+            if ((Get-Date) -ge $deadline) {
+                $status = 'TimedOut'
+                break
+            }
+
+            Start-Sleep -Milliseconds 250
+        }
+    }
+    finally {
+        if (-not $KeepRunning -or $status -eq 'TimedOut') {
+            Stop-TestProcess $process
+        }
+
+        $finalLog = Join-Path $runDirectory 'eduke32.log'
+        if (Test-Path -LiteralPath $logFile) {
+            Copy-Item -LiteralPath $logFile -Destination $finalLog -Force
+        }
+    }
+
+    $crashDumpDirectory = Join-Path $env:LOCALAPPDATA 'CrashDumps'
+    $newDumps = @()
+    if (Test-Path -LiteralPath $crashDumpDirectory) {
+        $newDumps = @(Get-ChildItem -LiteralPath $crashDumpDirectory -Filter 'eduke32*.dmp' -ErrorAction SilentlyContinue |
+            Where-Object { $_.LastWriteTime -ge $runStart })
+    }
+
+    $applicationEvents = @()
+    try {
+        $applicationEvents = @(Get-WinEvent -FilterHashtable @{ LogName = 'Application'; StartTime = $runStart } -ErrorAction SilentlyContinue |
+            Where-Object {
+                $_.ProviderName -in @('Application Error', 'Application Hang', 'Windows Error Reporting') -and
+                $_.Message -match 'eduke32'
+            } |
+            Select-Object TimeCreated, ProviderName, Id, Message)
+    }
+    catch {
+        $applicationEvents = @()
+    }
+
+    $result = [ordered]@{
+        mode = $Mode
+        run = $run
+        started = $runStart.ToString('o')
+        finished = (Get-Date).ToString('o')
+        status = $status
+        exitCode = $exitCode
+        reachedLogoEnd = $reachedLogoEnd
+        reachedMainMenu = $reachedMenu
+        reachedGameplay = $reachedGameplay
+        reachedStereoGameplay = $reachedStereoGameplay
+        xrRuntimeInitialized = $xrRuntimeInitialized
+        xrGraphicsInitialized = $xrGraphicsInitialized
+        log = (Join-Path $runDirectory 'eduke32.log')
+        crashDumps = @($newDumps | ForEach-Object { $_.FullName })
+        applicationEvents = @($applicationEvents)
+    }
+
+    $resultObject = [pscustomobject]$result
+    $resultObject | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $runDirectory 'summary.json') -Encoding UTF8
+    $allResults += $resultObject
+
+    Write-Host ("Run {0}: {1} (menu={2}, XR runtime={3}, XR graphics={4})" -f
+        $run, $status, $reachedMenu, $xrRuntimeInitialized, $xrGraphicsInitialized)
+    Write-Host "  Results: $runDirectory"
+}
+
+    if ($allResults | Where-Object { $_.status -notin @('ReachedMainMenu', 'ExitedAfterMainMenu', 'ReachedGameplay', 'ExitedAfterGameplay') }) {
+    exit 1
+}
+
+exit 0

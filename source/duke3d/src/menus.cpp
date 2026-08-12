@@ -8145,6 +8145,7 @@ static void Menu_RunInput(Menu_t *cm)
 void M_DisplayMenus(void)
 {
     vec2_t origin = { 0, 0 }, previousOrigin = { 0, 0 };
+    static int openxrMenuLogged;
 
     Net_GetPackets();
 
@@ -8153,6 +8154,15 @@ void M_DisplayMenus(void)
         walock[TILE_LOADSHOT] = CACHE1D_FREE;
         return;
     }
+
+#ifdef DUKEVR_OPENXR
+    if (!openxrMenuLogged)
+    {
+        LOG_F(INFO, "OpenXR main menu reached: menu=%d gm=0x%x",
+            g_currentMenu, g_player[myconnectindex].ps->gm);
+        openxrMenuLogged = 1;
+    }
+#endif
 
     if (!Menu_IsTextInput(m_currentMenu) && KB_KeyPressed(sc_Q))
         Menu_AnimateChange(MENU_QUIT, MA_Advance);

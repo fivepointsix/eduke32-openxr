@@ -337,14 +337,17 @@ RETAIL_MENU ?= 0
 POLYMER ?= 1
 USE_OPENGL := 1
 SDL_STATIC ?= 0
+OPENXRWIN ?= 0
+OPENXR_ROOT ?=
+OPENXR_LOADER ?= $(OPENXR_ROOT)/lib/openxr_loader.lib
 
 # Library toggles
 HAVE_GTK2 := 1
 USE_LIBVPX ?= 1
 HAVE_VORBIS := 1
-HAVE_FLAC := 1
+HAVE_FLAC ?= 1
 HAVE_XMP := 1
-RENDERTYPE := SDL
+RENDERTYPE ?= SDL
 SDL_TARGET := 2
 USE_PHYSFS := 0
 USE_MIMALLOC := 1
@@ -434,10 +437,10 @@ ifeq ($(RELEASE),0)
       endif
     endif
 
-    LTO := 0
+    LTO ?= 0
 else
     OPTLEVEL := 2
-    LTO := 1
+    LTO ?= 1
 endif
 
 ifeq (0,$(CLANG))
@@ -848,6 +851,10 @@ endif
 ifneq (0,$(POLYMER))
     COMPILERFLAGS += -DPOLYMER
 endif
+ifneq (0,$(OPENXRWIN))
+    override RENDERTYPE := WIN
+    COMPILERFLAGS += -DDUKEVR_OPENXR -DOPENXR -I"$(OPENXR_ROOT)/include" -Isource/duke3d/src
+endif
 
 
 ##### External library paths
@@ -986,6 +993,9 @@ ifeq ($(PLATFORM),WINDOWS)
         LIBS += -ldxguid_sdl
     endif
     LIBS += -lmingwex -lgdi32 -lcomctl32 -lwinmm $(L_SSP) -lwsock32 -lws2_32 -lshlwapi -luuid -lpsapi -ldinput -limm32 -lversion -lsetupapi -lole32 -loleaut32
+    ifneq (0,$(OPENXRWIN))
+        LIBS += "$(OPENXR_LOADER)" -lopengl32
+    endif
     # -lshfolder
 else ifeq ($(PLATFORM),WII)
     LIBS += -laesnd_tueidj -lfat -lwiiuse -lbte -lwiikeyboard -logc

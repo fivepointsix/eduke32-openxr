@@ -8,6 +8,9 @@
 #ifdef USE_OPENGL
 #include "glbuild.h"
 #include "glad/glad_wgl.h"
+#ifdef DUKEVR_OPENXR
+# include "dukevr_openxr.h"
+#endif
 #endif
 
 #define NEED_DINPUT_H
@@ -1772,6 +1775,44 @@ void videoShowFrame(int32_t w)
         if (palfadedelta)
             fullscreen_tint_gl(palfadergb.r, palfadergb.g, palfadergb.b, palfadedelta);
 
+#ifdef DUKEVR_OPENXR
+        {
+            static int traceCount;
+            if (traceCount < 16)
+            {
+                LOG_F(INFO, "OpenXR video frame %d: scene=%d eye=%d enabled=%d size=%dx%d",
+                    traceCount, DukeVROpenXR_SceneFrameActive(), DukeVROpenXR_CurrentEye(),
+                    DukeVROpenXR_Enabled(), xres, yres);
+                traceCount++;
+            }
+        }
+
+        /* A gameplay frame is already being drawn into the acquired eye
+         * swapchain. Keep the window responsive and mirror the completed
+         * right eye, but do not release the OpenXR images until EndFrame. */
+        if (DukeVROpenXR_SceneFrameActive())
+        {
+            if (DukeVROpenXR_CurrentEye() == 1)
+            {
+                DukeVROpenXR_PresentMirror(1, xres, yres);
+                SwapBuffers(hDC);
+            }
+            polymost_resetState();
+            return;
+        }
+
+        /* Front-end screens, setup, title art, and menus are rendered once
+         * by the normal EDuke32 path. Copy that desktop framebuffer into
+         * both runtime images so the launcher and every menu remain visible
+         * in the headset before gameplay starts. */
+        if (DukeVROpenXR_Enabled() && DukeVROpenXR_SubmitDesktopFrame(xres, yres))
+        {
+            SwapBuffers(hDC);
+            polymost_resetState();
+            return;
+        }
+#endif
+
         SwapBuffers(hDC);
 #ifdef USE_OPENGL
         polymost_resetState();
@@ -2695,6 +2736,11 @@ static BOOL CreateAppWindow(int32_t modenum)
         height = customydim;
         fs = customfs;
         bitspp = custombpp;
+        /* Custom windowed modes do not have a mode-table refresh rate.  A
+         * sentinel of -1 makes the normal r_maxfps=-1 path wait forever;
+         * use the configured desktop cap instead. OpenXR overrides pacing
+         * with xrWaitFrame once its graphics session is ready. */
+        rfreq = maxrefreshfreq > 0 ? (int32_t)maxrefreshfreq : 60;
     }
     else
     {

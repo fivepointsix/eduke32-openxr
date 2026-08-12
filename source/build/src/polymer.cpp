@@ -11,6 +11,10 @@
 #include "xxhash_config.h"
 #include "texcache.h"
 
+#ifdef DUKEVR_OPENXR
+#include "dukevr_openxr.h"
+#endif
+
 #define LIBTESS2_IMPLEMENTATION
 
 #include "libtess2.h"
@@ -936,6 +940,48 @@ void                polymer_setaspect(int32_t ang)
     buildgl_setPerspective(fang * (360.f/2048.f), aspect, 0.01f, 100.0f);
 }
 
+#ifdef DUKEVR_OPENXR
+/* OpenXR supplies an asymmetric frustum for each eye. Polymer's normal
+ * centered perspective is suitable for a desktop window, but using it for a
+ * projection-layer eye makes the headset show only the center of the scene
+ * (the telescope effect). Install the exact runtime frustum after Polymer's
+ * normal initialization and before drawing the room. */
+static int polymer_set_openxr_projection(void)
+{
+    float angle_left, angle_right, angle_up, angle_down;
+    int scene_width, scene_height;
+    int const eye = DukeVROpenXR_CurrentEye();
+    static int logged;
+
+    if (!DukeVROpenXR_FrameActive() || eye < 0 || eye > 1 ||
+        !DukeVROpenXR_GetEyeFov(eye, &angle_left, &angle_right,
+            &angle_up, &angle_down) ||
+        !DukeVROpenXR_GetSceneDimensions(&scene_width, &scene_height))
+        return 0;
+
+    float const near_clip = 0.01f;
+    float const far_clip = 100.0f;
+    glMatrixMode(GL_PROJECTION);
+    glLoadIdentity();
+    glFrustum(tanf(angle_left) * near_clip,
+        tanf(angle_right) * near_clip,
+        tanf(angle_down) * near_clip,
+        tanf(angle_up) * near_clip,
+        near_clip, far_clip);
+    /* polymer_glinit() restores the desktop viewport before this function is
+     * called. The viewport must match the intermediate target's aspect or
+     * the exact OpenXR frustum is stretched again before the final blit. */
+    glViewport(0, 0, scene_width, scene_height);
+    if (!logged)
+    {
+        LOG_F(INFO, "OpenXR Polymer projection active: eye=%d FOV=%0.4f/%0.4f/%0.4f/%0.4f viewport=%dx%d",
+            eye, angle_left, angle_right, angle_up, angle_down, scene_width, scene_height);
+        logged = 1;
+    }
+    return 1;
+}
+#endif
+
 void                polymer_glinit(void)
 {
     glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
@@ -1096,12 +1142,25 @@ void polymer_drawrooms(int32_t daposx, int32_t daposy, int32_t daposz, fix16_t d
     int16_t         cursectnum;
     int32_t         i, cursectflorz=0, cursectceilz=0;
     float           skyhoriz, ang, tiltang;
+#ifdef DUKEVR_OPENXR
+    float           openxr_yaw_residual = 0.f;
+    float           openxr_pitch_residual = 0.f;
+    float           openxr_roll_residual = 0.f;
+    float           openxr_pos_residual[3] = { 0.f, 0.f, 0.f };
+#endif
     float           pos[3];
     pthtyp*         pth;
 
     if (videoGetRenderMode() == REND_CLASSIC) return;
 
     videoBeginDrawing();
+
+#ifdef DUKEVR_OPENXR
+    /* Rebuild the projection after the game has selected the current eye.
+     * This must happen inside the renderer, after polymer_glinit(), because
+     * the runtime provides a different asymmetric FOV for each eye. */
+    polymer_set_openxr_projection();
+#endif
 
     // TODO: support for screen resizing
     // frameoffset = frameplace + windowxy1.y*bytesperline + windowxy1.x;
@@ -1115,9 +1174,31 @@ void polymer_drawrooms(int32_t daposx, int32_t daposy, int32_t daposz, fix16_t d
     horizang = -(float)atan2f(fix16_to_float(dahoriz) - 100.f, 128.f) * (180.f * (float)M_1_PI);
     tiltang = (gtang * 90.0f);
 
+#ifdef DUKEVR_OPENXR
+    if (DukeVROpenXR_FrameActive() && DukeVROpenXR_CurrentEye() >= 0)
+    {
+        DukeVROpenXR_GetRenderOrientationResidual(&openxr_yaw_residual,
+            &openxr_pitch_residual, &openxr_roll_residual);
+        DukeVROpenXR_GetRenderPositionResidual(&openxr_pos_residual[0],
+            &openxr_pos_residual[1], &openxr_pos_residual[2]);
+    }
+#endif
+
+#ifdef DUKEVR_OPENXR
+    ang += openxr_yaw_residual * (180.f * (float)M_1_PI);
+    horizang += openxr_pitch_residual * (180.f * (float)M_1_PI);
+    tiltang += openxr_roll_residual * (180.f * (float)M_1_PI);
+#endif
+
     pos[0] = (float)daposy;
     pos[1] = -(float)(daposz) * (1.f/16.f);
     pos[2] = -(float)daposx;
+
+#ifdef DUKEVR_OPENXR
+    pos[0] += openxr_pos_residual[1];
+    pos[1] -= openxr_pos_residual[2] * (1.f/16.f);
+    pos[2] -= openxr_pos_residual[0];
+#endif
 
     polymer_updatelights();
 

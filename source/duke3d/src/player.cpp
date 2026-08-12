@@ -3299,7 +3299,15 @@ void P_GetInput(int const playerNum)
     }
 
     if (g_myAimMode)
+    {
+#ifdef DUKEVR_OPENXR
+        /* Legacy DukeVR reserved vertical aiming for the headset. Keep the
+         * mouse on the horizontal turn axis so mouse movement cannot fight
+         * the OpenXR head-pitch contribution committed by the VR renderer. */
+#else
         input.q16horz = fix16_sadd(input.q16horz, fix16_sdiv(fix16_from_int(info.mousey), F16(64)));
+#endif
+    }
     else
         input.fvel = -(info.mousey >> 3);
 

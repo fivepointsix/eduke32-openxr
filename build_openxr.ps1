@@ -162,6 +162,16 @@ if (-not $SkipRuntimeData) {
         if (Test-Path -LiteralPath $texturesSource) {
             Copy-Item -LiteralPath $texturesSource -Destination $buildRoot -Recurse -Force
         }
+
+        # The VR backdrop uses the high-resolution skybox definitions.  Keep
+        # these beside the executable so a staged release behaves like the
+        # source/runtime tree instead of silently falling back to ART skies.
+        foreach ($runtimeDirectory in @('HRP_skyboxes', 'DC_skyboxes')) {
+            $sourceDirectory = Join-Path $RuntimeSource $runtimeDirectory
+            if (Test-Path -LiteralPath $sourceDirectory) {
+                Copy-Item -LiteralPath $sourceDirectory -Destination $buildRoot -Recurse -Force
+            }
+        }
     }
 
     if (-not [string]::IsNullOrWhiteSpace($GameDataRoot)) {

@@ -251,7 +251,18 @@ void G_HandleSpecialKeys(void)
 void G_GameQuit(void)
 {
     if (numplayers < 2)
+    {
+#ifdef DUKEVR_OPENXR
+        /* A normal quit must not enter the legacy shareware/TEN end-screen
+         * loops. Those screens run their own desktop event/render loop and
+         * cannot be completed reliably while an OpenXR frame is active. An
+         * empty message keeps G_GameExit's cleanup path while suppressing
+         * the optional end screens and error dialog. */
+        G_GameExit("");
+#else
         G_GameExit();
+#endif
+    }
 
     if (g_gameQuit == 0)
     {
@@ -354,7 +365,7 @@ void G_GameExit(const char *msg)
     if (in3dmode())
         G_Shutdown();
 
-    if (msg != nullptr)
+    if (msg != nullptr && *msg != 0)
     {
         char titlebuf[256];
         Bsnprintf(titlebuf, sizeof(titlebuf), HEAD2 " %s", s_buildRev);
@@ -6042,8 +6053,10 @@ static void G_Cleanup(void)
 void G_Shutdown(void)
 {
     CONFIG_WriteSetup(0);
-    S_SoundShutdown();
+    /* Music may use the sound backend (for example waveform music), so it
+     * must be stopped before the backend itself is torn down. */
     S_MusicShutdown();
+    S_SoundShutdown();
     CONTROL_Shutdown();
     KB_Shutdown();
 #ifdef DUKEVR_OPENXR
@@ -6544,22 +6557,85 @@ static void DukeVRRestorePlayerView(DukePlayer_t *p, DukeVRPlayerViewState const
     p->orotscrnang = state->orotscrnang;
 }
 
+/* Legacy DukeVR committed the rotational part of the headset pose into the
+ * player state before input/gameplay ran.  The modern renderer originally
+ * applied it only while drawing each eye, then restored it; that made the
+ * crosshair appear to follow the headset while weapon traces still used the
+ * old mouse angle.  Keep the quantized Build state and the fractional pose
+ * residual separate, just as the legacy Polymer path did. */
+static int dukeVrHeadAimInitialized;
+static float dukeVrHeadAimAppliedYaw;
+static float dukeVrHeadAimAppliedPitch;
+static float dukeVrHeadAimYawResidual;
+static float dukeVrHeadAimPitchResidual;
+
+static void DukeVRCommitHeadAim(DukePlayer_t *p)
+{
+    if (p == nullptr || p->newowner != -1)
+        return;
+
+    if (!dukeVrHeadAimInitialized)
+    {
+        dukeVrHeadAimAppliedYaw = g_dukeVrTrackingYaw;
+        dukeVrHeadAimAppliedPitch = g_dukeVrTrackingPitch;
+        dukeVrHeadAimYawResidual = 0.f;
+        dukeVrHeadAimPitchResidual = 0.f;
+        dukeVrHeadAimInitialized = 1;
+        return;
+    }
+
+    /* Unwrap yaw against the value already consumed. OpenXR Euler yaw wraps
+     * at +/- PI, while the Build angle is continuous modulo 2048. */
+    float yawDelta = g_dukeVrTrackingYaw - dukeVrHeadAimAppliedYaw;
+    while (yawDelta > (float)PI)
+        yawDelta -= (float)PI * 2.f;
+    while (yawDelta < -(float)PI)
+        yawDelta += (float)PI * 2.f;
+    float const unwrappedYaw = dukeVrHeadAimAppliedYaw + yawDelta;
+
+    int32_t const yawUnits = (int32_t)floorf(yawDelta * (1024.f / (float)PI) +
+        (yawDelta >= 0.f ? .5f : -.5f));
+    if (yawUnits != 0)
+    {
+        int32_t const newAngle = (fix16_to_int(p->q16ang) + yawUnits) & 2047;
+        p->q16ang = p->oq16ang = fix16_from_int(newAngle);
+        if (p->newowner == -1)
+            sprite[p->i].ang = newAngle;
+    }
+
+    dukeVrHeadAimAppliedYaw += (float)yawUnits * ((float)PI / 1024.f);
+    dukeVrHeadAimYawResidual = unwrappedYaw - dukeVrHeadAimAppliedYaw;
+
+    /* Apply pitch in angular space, because q16horiz is a tan() encoded
+     * value. This also preserves mouse pitch changes made between headset
+     * samples instead of replacing them with an absolute headset angle. */
+    float const currentPitch = atanf((fix16_to_float(p->q16horiz + p->q16horizoff) - 100.f) / 128.f);
+    float const pitchDelta = g_dukeVrTrackingPitch - dukeVrHeadAimAppliedPitch;
+    float const targetPitch = fclamp(currentPitch + pitchDelta,
+        -(float)PI * .49f, (float)PI * .49f);
+    int32_t const pitchValue = clamp((int32_t)floorf(tanf(targetPitch) * 128.f + 100.f + .5f),
+        HORIZ_MIN, HORIZ_MAX);
+    float const quantizedPitch = atanf(((float)pitchValue - 100.f) / 128.f);
+
+    p->q16horiz = p->oq16horiz = fix16_from_int(pitchValue);
+    p->q16horizoff = p->oq16horizoff = 0;
+    dukeVrHeadAimPitchResidual = targetPitch - quantizedPitch;
+    dukeVrHeadAimAppliedPitch = g_dukeVrTrackingPitch - dukeVrHeadAimPitchResidual;
+}
+
 static void DukeVRApplyPlayerView(DukePlayer_t *p, int eye,
     float const eyeOrientation[2][4], float const eyePosition[2][3], float smoothratio)
 {
     float centerRaw[3], center[3];
     float eyeDeltaRaw[3], eyeDelta[3];
-    float const trackingYaw = g_dukeVrTrackingYaw;
-    float const trackingPitch = g_dukeVrTrackingPitch;
     float const trackingRoll = g_dukeVrTrackingRoll;
     float const baseYaw = (float)fix16_to_int(p->q16ang) * ((float)PI * (1.f / 1024.f));
-    float const basePitch = atanf((((float)p->q16horiz + (float)p->q16horizoff) / 65536.f - 100.f) / 128.f);
     float const baseRoll = (float)p->rotscrnang * ((float)PI / 650.f);
-    float const targetPitch = fclamp(basePitch + trackingPitch, -(float)PI * .49f, (float)PI * .49f);
+    /* Head yaw/pitch are already in p->q16ang/q16horiz for both rendering
+     * and gameplay. Applying the full pose here as well would double it. */
     float const targetRoll = baseRoll - trackingRoll;
-    int32_t const yawUnits = (int32_t)floorf(trackingYaw * (1024.f / (float)PI) +
-        (trackingYaw >= 0.f ? .5f : -.5f));
-    int32_t const pitchValue = clamp((int32_t)floorf(tanf(targetPitch) * 128.f + 100.f + .5f), HORIZ_MIN, HORIZ_MAX);
+    int32_t const yawUnits = 0;
+    int32_t const pitchValue = fix16_to_int(p->q16horiz);
     int32_t const rollValue = clamp((int32_t)floorf(targetRoll * (650.f / (float)PI) + (targetRoll >= 0.f ? .5f : -.5f)), -650, 650);
 
     (void)eyeOrientation;
@@ -6631,23 +6707,27 @@ static void DukeVRApplyPlayerView(DukePlayer_t *p, int eye,
      * fields for gameplay, while Polymer receives the fraction that was
      * discarded so the rendered camera matches the OpenXR pose. */
     {
-        float const quantizedYaw = (float)yawUnits * ((float)PI / 1024.f);
-        float const quantizedPitch = atanf(((float)pitchValue - 100.f) / 128.f);
         float const targetRollUnits = targetRoll * (650.f / (float)PI);
         float const quantizedTiltDegrees = (float)rollValue * ((float)PI * 90.f / 1024.f);
         float const targetTiltDegrees = targetRollUnits * ((float)PI * 90.f / 1024.f);
 
         DukeVROpenXR_SetRenderOrientationResidual(
-            trackingYaw - quantizedYaw,
-            quantizedPitch - targetPitch,
+            dukeVrHeadAimYawResidual,
+            -dukeVrHeadAimPitchResidual,
             (targetTiltDegrees - quantizedTiltDegrees) * ((float)PI / 180.f));
     }
 }
 
 static int DukeVRIsInGameMenu(MenuID_t menu)
 {
-    return menu == MENU_MAIN_INGAME || menu == MENU_COLCORR_INGAME ||
-        menu == MENU_QUIT_INGAME || menu == MENU_SOUND_INGAME;
+    /* Every menu opened from a live mission belongs on the head-locked HUD.
+     * The old whitelist covered only the first in-game menu and a few
+     * special pages; Options, controls, display setup, save/load and verify
+     * pages then fell back to the desktop presentation path. That path is
+     * not synchronized with the stereo scene frame and appears frozen or
+     * missing in the headset. */
+    (void)menu;
+    return 1;
 }
 
 static int DukeVRRenderStereoFrame(int smoothratio)
@@ -6715,6 +6795,13 @@ static int DukeVRRenderStereoFrame(int smoothratio)
     g_dukeVrTrackingYaw = trackingYaw;
     g_dukeVrTrackingPitch = trackingPitch;
     g_dukeVrTrackingRoll = trackingRoll;
+
+    /* Use the local player's persistent angle for gameplay. In normal play
+     * screenpeek is the local player; keep the identity check so a remote
+     * camera/spectator view cannot steer the local weapon state. */
+    DukePlayer_t *localPlayer = g_player[myconnectindex].ps;
+    if (pPlayer == localPlayer)
+        DukeVRCommitHeadAim(localPlayer);
 
     {
         static int poseTrace;
@@ -6842,11 +6929,38 @@ void drawframe_do(void)
     int vrFrameRendered = 0;
 #ifdef DUKEVR_OPENXR
     static int loggedGameplayState;
+    static int dukeVrTestMenuState;
     DukePlayer_t *framePlayer = (screenpeek >= 0 && screenpeek < MAXPLAYERS) ? g_player[screenpeek].ps : nullptr;
     if (!loggedGameplayState && framePlayer && (framePlayer->gm & MODE_GAME) && !(framePlayer->gm & MODE_MENU))
     {
         LOG_F(INFO, "OpenXR gameplay state reached");
         loggedGameplayState = 1;
+    }
+
+    /* Test-only automation hook. It is enabled only when the harness sets
+     * DUKEVR_TEST_MENU, and lets unattended runs exercise secondary in-game
+     * menus without depending on desktop focus or synthetic keyboard input. */
+    if (dukeVrTestMenuState == 0 && framePlayer &&
+        (framePlayer->gm & MODE_GAME) && !(framePlayer->gm & MODE_MENU))
+    {
+        const char *testMenu = Bgetenv("DUKEVR_TEST_MENU");
+        if (testMenu != nullptr)
+        {
+            Menu_Open(myconnectindex);
+            Menu_Change(MENU_MAIN_INGAME);
+            if (strcmp(testMenu, "options") == 0)
+            {
+                Menu_Change(MENU_OPTIONS);
+                dukeVrTestMenuState = 1;
+            }
+            else if (strcmp(testMenu, "quit") == 0)
+            {
+                Menu_Change(MENU_QUIT_INGAME);
+                dukeVrTestMenuState = 2;
+            }
+            else
+                dukeVrTestMenuState = -1;
+        }
     }
     vrFrameRendered = DukeVRRenderStereoFrame(smoothratio);
 #endif
@@ -6867,6 +6981,10 @@ void drawframe_do(void)
 
     if (!vrFrameRendered)
         videoNextPage();
+#ifdef DUKEVR_OPENXR
+    if (dukeVrTestMenuState == 2)
+        G_GameQuit();
+#endif
     S_Update();
     g_lastFrameEndTime2 = timerGetNanoTicks();
     g_lastFrameDuration2 = g_lastFrameEndTime2 - g_lastFrameStartTime;

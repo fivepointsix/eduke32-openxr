@@ -1542,10 +1542,11 @@ void DukeVROpenXR_EndFrame(void) {
          * texture. Use the source aspect for the physical quad so that copy
          * does not make the menus/HUD appear optically zoomed or distorted. */
         hud_layer.size.height = hud_layer.size.width / aspect;
-        /* The title/setup screens are mono projection frames. In-game menus
-         * are rendered into this head-locked HUD quad; shrink only that quad
-         * while the legacy menu-scale flag is active. */
-        if (gOpenXR.hud_menu_scaled)
+        /* Front-end title/setup screens are mono frames submitted through
+         * this same head-locked quad and need the smaller legacy presentation
+         * size. In-game mission menus already set hud_menu_scaled and retain
+         * their existing size. */
+        if (gOpenXR.mono_quad_submitted || gOpenXR.hud_menu_scaled)
         {
             hud_layer.size.width *= 0.5f;
             hud_layer.size.height *= 0.5f;

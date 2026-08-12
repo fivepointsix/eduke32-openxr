@@ -8146,6 +8146,7 @@ void M_DisplayMenus(void)
 {
     vec2_t origin = { 0, 0 }, previousOrigin = { 0, 0 };
     static int openxrMenuLogged;
+    static MenuID_t openxrLastMenu = MENU_NULL;
 
     Net_GetPackets();
 
@@ -8156,6 +8157,12 @@ void M_DisplayMenus(void)
     }
 
 #ifdef DUKEVR_OPENXR
+    if (openxrLastMenu != g_currentMenu)
+    {
+        LOG_F(INFO, "OpenXR menu state: menu=%d gm=0x%x",
+            g_currentMenu, g_player[myconnectindex].ps->gm);
+        openxrLastMenu = g_currentMenu;
+    }
     if (!openxrMenuLogged)
     {
         LOG_F(INFO, "OpenXR main menu reached: menu=%d gm=0x%x",

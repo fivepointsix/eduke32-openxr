@@ -9,6 +9,8 @@ param(
     [int]$Repeat = 1,
     [switch]$EnterMission,
     [switch]$StartMission,
+    [ValidateSet('None', 'Options', 'Quit')]
+    [string]$InGameMenuAction = 'None',
     [switch]$KeepRunning,
     [string[]]$GameArguments = @('-nosetup'),
     [string]$BuildRoot
@@ -30,6 +32,16 @@ $executable = Join-Path $buildRoot 'eduke32.exe'
 $logFile = Join-Path $buildRoot 'eduke32.log'
 $resultsRoot = Join-Path $buildRoot 'test-results'
 $runtimeManifest = $null
+$needsMissionInput = $EnterMission
+$needsKeyboardInput = $needsMissionInput
+$runMission = $StartMission -or $needsMissionInput
+
+if ($InGameMenuAction -ne 'None' -and -not ($StartMission -or $EnterMission)) {
+    throw "-InGameMenuAction requires -StartMission or -EnterMission."
+}
+if ($InGameMenuAction -ne 'None' -and $KeepRunning) {
+    throw "-KeepRunning cannot be combined with -InGameMenuAction."
+}
 
 if ($Mode -eq 'OpenXR') {
     $runtimeManifest = [Environment]::GetEnvironmentVariable('XR_RUNTIME_JSON', 'Process')
@@ -84,7 +96,7 @@ function Read-TestLog {
     }
 }
 
-if ($EnterMission) {
+if ($needsKeyboardInput) {
     Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
@@ -164,6 +176,9 @@ for ($run = 1; $run -le $Repeat; $run++) {
             $startInfo.EnvironmentVariables['XR_RUNTIME_JSON'] = $runtimeManifest
         }
     }
+    if ($InGameMenuAction -ne 'None') {
+        $startInfo.EnvironmentVariables['DUKEVR_TEST_MENU'] = $InGameMenuAction.ToLowerInvariant()
+    }
 
     $process = New-Object Diagnostics.Process
     $process.StartInfo = $startInfo
@@ -177,6 +192,8 @@ for ($run = 1; $run -le $Repeat; $run++) {
     $reachedGameplay = $false
     $reachedStereoGameplay = $false
     $missionKeysSent = $false
+    $menuActionSent = $InGameMenuAction -ne 'None'
+    $menuActionCompleted = $InGameMenuAction -eq 'None'
     $xrRuntimeInitialized = $false
     $xrGraphicsInitialized = $false
     $status = 'TimedOut'
@@ -189,10 +206,11 @@ for ($run = 1; $run -le $Repeat; $run++) {
             $reachedMenu = $logText -match 'OpenXR main menu reached'
             $reachedGameplay = $logText -match 'OpenXR gameplay state reached|OpenXR stereo gameplay frame submitted'
             $reachedStereoGameplay = $logText -match 'OpenXR stereo gameplay frame submitted'
+            $reachedQuitMenu = $logText -match 'OpenXR menu state: menu=502'
             $xrRuntimeInitialized = $logText -match 'OpenXR runtime initialized:'
             $xrGraphicsInitialized = $logText -match 'OpenXR graphics initialized:'
 
-            if ($EnterMission -and $reachedMenu -and -not $missionKeysSent) {
+            if ($needsMissionInput -and $reachedMenu -and -not $missionKeysSent) {
                 $process.Refresh()
                 if ($process.MainWindowHandle -eq [IntPtr]::Zero) {
                     Start-Sleep -Milliseconds 500
@@ -215,12 +233,22 @@ for ($run = 1; $run -le $Repeat; $run++) {
                 $missionKeysSent = $true
             }
 
+            if ($InGameMenuAction -eq 'Options' -and $menuActionSent -and
+                $logText -match 'OpenXR menu state: menu=202') {
+                $menuActionCompleted = $true
+                $status = 'ReachedInGameOptions'
+                break
+            }
+
             # The gameplay marker is emitted before the first stereo frame can
             # finish. Keep polling in OpenXR mission tests so a normal startup
             # race is not reported as a false ReachedGameplayWithoutStereo.
             $waitingForStereo = $Mode -eq 'OpenXR' -and $StartMission -and
                 $reachedGameplay -and -not $reachedStereoGameplay
-            if ($reachedGameplay -and -not $KeepRunning -and -not $waitingForStereo) {
+            $waitingForMenuAction = $InGameMenuAction -ne 'None' -and
+                -not $menuActionCompleted
+            if ($reachedGameplay -and -not $KeepRunning -and
+                -not $waitingForStereo -and -not $waitingForMenuAction) {
                 if ($Mode -eq 'OpenXR' -and (-not $xrRuntimeInitialized -or -not $xrGraphicsInitialized)) {
                     $status = 'ReachedGameplayWithoutXR'
                 }
@@ -246,7 +274,11 @@ for ($run = 1; $run -le $Repeat; $run++) {
             $process.Refresh()
             if ($process.HasExited) {
                 $exitCode = $process.ExitCode
-                if ($reachedMenu -and $Mode -eq 'OpenXR' -and (-not $xrRuntimeInitialized -or -not $xrGraphicsInitialized)) {
+                if ($InGameMenuAction -eq 'Quit' -and $menuActionSent -and $reachedQuitMenu) {
+                    $menuActionCompleted = $true
+                    $status = 'ExitedAfterQuit'
+                }
+                elseif ($reachedMenu -and $Mode -eq 'OpenXR' -and (-not $xrRuntimeInitialized -or -not $xrGraphicsInitialized)) {
                     $status = 'ExitedAfterMainMenuWithoutXR'
                 }
                 else {
@@ -305,6 +337,10 @@ for ($run = 1; $run -le $Repeat; $run++) {
         reachedMainMenu = $reachedMenu
         reachedGameplay = $reachedGameplay
         reachedStereoGameplay = $reachedStereoGameplay
+        reachedQuitMenu = $reachedQuitMenu
+        inGameMenuAction = $InGameMenuAction
+        inGameMenuActionSent = $menuActionSent
+        inGameMenuActionCompleted = $menuActionCompleted
         xrRuntimeInitialized = $xrRuntimeInitialized
         xrGraphicsInitialized = $xrGraphicsInitialized
         log = (Join-Path $runDirectory 'eduke32.log')
@@ -321,7 +357,10 @@ for ($run = 1; $run -le $Repeat; $run++) {
     Write-Host "  Results: $runDirectory"
 }
 
-    if ($allResults | Where-Object { $_.status -notin @('ReachedMainMenu', 'ExitedAfterMainMenu', 'ReachedGameplay', 'ExitedAfterGameplay') }) {
+    if ($allResults | Where-Object {
+        $_.status -notin @('ReachedMainMenu', 'ExitedAfterMainMenu', 'ReachedGameplay', 'ExitedAfterGameplay', 'ReachedInGameOptions', 'ExitedAfterQuit') -or
+        ($_.status -eq 'ExitedAfterQuit' -and $_.exitCode -ne 0)
+    }) {
     exit 1
 }
 

@@ -8,6 +8,7 @@
 #include "build.h"
 #include "common_game.h"
 #include "compat.h"
+#include "cmdline.h"
 #include "grpscan.h"
 #include "palette.h"
 #include "texcache.h"
@@ -457,6 +458,17 @@ void G_LoadGroups(int32_t autoload)
 
     if (g_modDir[0] != '/')
         G_LoadGroupsInDir(g_modDir);
+
+#ifdef DUKEVR_OPENXR
+    /* OpenXR release builds are commonly launched with -nosetup.  That
+     * option deliberately skips reading ModDir from the config, so make the
+     * bundled HRP sky definitions available explicitly in that case. */
+    if (g_noSetup && buildvfs_isdir("HRP_skyboxes"))
+    {
+        addsearchpath("HRP_skyboxes");
+        LOG_F(INFO, "OpenXR: using bundled HRP_skyboxes definitions.");
+    }
+#endif
 
 #ifndef EDUKE32_STANDALONE
     if (g_defNamePtr == NULL)

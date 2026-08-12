@@ -21,6 +21,7 @@ Ken Silverman's official web site: http://www.advsys.net/ken
 #include "texcache.h"
 #include "hash.h"
 
+
 #ifdef POLYMOST2
 int32_t r_enablepolymost2 = 0;
 #endif // POLYMOST2

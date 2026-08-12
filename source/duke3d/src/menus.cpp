@@ -31,6 +31,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include "duke3d.h"
 #include "in_android.h"
 #include "input.h"
+#include "config.h"
 #include "osdcmds.h"
 #include "savegame.h"
 #include "xxhash.h"
@@ -358,6 +359,9 @@ static MenuLink_t MEO_MAIN_NEWGAME_NETWORK = { MENU_NETWORK, MA_Advance, };
 MAKE_MENU_TOP_ENTRYLINK( s_SaveGame, MEF_MainMenu, MAIN_SAVEGAME, MENU_SAVE );
 MAKE_MENU_TOP_ENTRYLINK( s_LoadGame, MEF_MainMenu, MAIN_LOADGAME, MENU_LOAD );
 MAKE_MENU_TOP_ENTRYLINK( s_Options, MEF_MainMenu, MAIN_OPTIONS, MENU_OPTIONS );
+#ifdef DUKEVR_OPENXR
+MAKE_MENU_TOP_ENTRYLINK( "VR Options", MEF_MainMenu, MAIN_VR_OPTIONS, MENU_VRHUDSETUP );
+#endif
 #ifdef EDUKE32_STANDALONE
 MAKE_MENU_TOP_ENTRYLINK( "Read me!", MEF_MainMenu, MAIN_HELP, MENU_STORY );
 #else
@@ -376,6 +380,9 @@ static MenuEntry_t *MEL_MAIN[] = {
     &ME_MAIN_NEWGAME,
     &ME_MAIN_LOADGAME,
     &ME_MAIN_OPTIONS,
+#ifdef DUKEVR_OPENXR
+    &ME_MAIN_VR_OPTIONS,
+#endif
     &ME_MAIN_HELP,
 #ifndef EDUKE32_RETAIL_MENU
     &ME_MAIN_CREDITS,
@@ -392,6 +399,9 @@ static MenuEntry_t *MEL_MAIN_INGAME[] = {
     &ME_MAIN_SAVEGAME,
     &ME_MAIN_LOADGAME,
     &ME_MAIN_OPTIONS,
+#ifdef DUKEVR_OPENXR
+    &ME_MAIN_VR_OPTIONS,
+#endif
     &ME_MAIN_HELP,
     &ME_MAIN_QUITTOTITLE,
 #ifndef EDUKE32_RETAIL_MENU
@@ -713,6 +723,21 @@ static MenuEntry_t ME_SCREENSETUP_SBARSIZE = MAKE_MENUENTRY( s_Scale, &MF_Redfon
 
 static MenuLink_t MEO_DISPLAYSETUP_SCREENSETUP = { MENU_SCREENSETUP, MA_Advance, };
 static MenuEntry_t ME_DISPLAYSETUP_SCREENSETUP = MAKE_MENUENTRY( "HUD setup", &MF_Redfont, &MEF_BigOptionsRt, &MEO_DISPLAYSETUP_SCREENSETUP, Link );
+
+#ifdef DUKEVR_OPENXR
+static MenuLink_t MEO_VRHUD_WEAPON = { MENU_VRHUDWEAPON, MA_Advance, };
+static MenuLink_t MEO_VRHUD_STATUSBAR = { MENU_VRHUDSTATUSBAR, MA_Advance, };
+static MenuLink_t MEO_VRHUD_RESET = { MENU_VRHUDRESETVERIFY, MA_None, };
+static MenuEntry_t ME_VRHUD_WEAPON = MAKE_MENUENTRY( "Move weapon", &MF_Redfont, &MEF_BigOptionsRt, &MEO_VRHUD_WEAPON, Link );
+static MenuEntry_t ME_VRHUD_STATUSBAR = MAKE_MENUENTRY( "Move status bar", &MF_Redfont, &MEF_BigOptionsRt, &MEO_VRHUD_STATUSBAR, Link );
+static MenuEntry_t ME_VRHUD_RESET = MAKE_MENUENTRY( "Reset positions", &MF_Redfont, &MEF_BigOptionsRt, &MEO_VRHUD_RESET, Link );
+static MenuEntry_t ME_VRHUD_WEAPON_INSTRUCTIONS = MAKE_MENUENTRY( "Hold grip and move controller", &MF_Minifont, &MEF_CenterMenu, &MEO_NULL, Dummy );
+static MenuEntry_t ME_VRHUD_STATUSBAR_INSTRUCTIONS = MAKE_MENUENTRY( "Hold grip and move controller", &MF_Minifont, &MEF_CenterMenu, &MEO_NULL, Dummy );
+static MenuEntry_t ME_VRHUD_EXIT_INSTRUCTIONS = MAKE_MENUENTRY( "Press back to finish", &MF_Minifont, &MEF_CenterMenu, &MEO_NULL, Dummy );
+static MenuEntry_t *MEL_VRHUDSETUP[] = { &ME_VRHUD_WEAPON, &ME_VRHUD_STATUSBAR, &ME_VRHUD_RESET, };
+static MenuEntry_t *MEL_VRHUDWEAPON[] = { &ME_VRHUD_WEAPON_INSTRUCTIONS, &ME_VRHUD_EXIT_INSTRUCTIONS, };
+static MenuEntry_t *MEL_VRHUDSTATUSBAR[] = { &ME_VRHUD_STATUSBAR_INSTRUCTIONS, &ME_VRHUD_EXIT_INSTRUCTIONS, };
+#endif
 
 
 #ifndef EDUKE32_RETAIL_MENU
@@ -1547,6 +1572,11 @@ static MenuMenu_t M_POLYMER = MAKE_MENUMENU( "Polymer Setup", &MMF_BigOptionsScr
 static MenuMenu_t M_COLCORR = MAKE_MENUMENU( "Color Correction", &MMF_ColorCorrect, MEL_COLCORR );
 static MenuMenu_t M_SCREENSETUP = MAKE_MENUMENU( "HUD Setup", &MMF_BigOptions, MEL_SCREENSETUP );
 static MenuMenu_t M_DISPLAYSETUP = MAKE_MENUMENU( "Display Setup", &MMF_BigOptions, MEL_DISPLAYSETUP );
+#ifdef DUKEVR_OPENXR
+static MenuMenu_t M_VRHUDSETUP = MAKE_MENUMENU( "VR HUD Setup", &MMF_BigOptions, MEL_VRHUDSETUP );
+static MenuMenu_t M_VRHUDWEAPON = MAKE_MENUMENU( "Move Weapon", &MMF_BigOptions, MEL_VRHUDWEAPON );
+static MenuMenu_t M_VRHUDSTATUSBAR = MAKE_MENUMENU( "Move Status Bar", &MMF_BigOptions, MEL_VRHUDSTATUSBAR );
+#endif
 static MenuMenu_t M_LOAD = MAKE_MENUMENU_CUSTOMSIZE( s_LoadGame, &MMF_LoadSave, MEL_LOAD );
 static MenuMenu_t M_SAVE = MAKE_MENUMENU_CUSTOMSIZE( s_SaveGame, &MMF_LoadSave, MEL_SAVE );
 static MenuMenu_t M_SOUND = MAKE_MENUMENU( "Sound Setup", &MMF_BigOptions, MEL_SOUND );
@@ -1586,6 +1616,10 @@ static MenuVerify_t M_NEWVERIFY = { CURSOR_CENTER_2LINE, MENU_EPISODE, MA_Advanc
 static MenuVerify_t M_SAVEVERIFY = { CURSOR_CENTER_2LINE, MENU_SAVE, MA_None, };
 static MenuVerify_t M_SAVEDELVERIFY = { CURSOR_CENTER_3LINE, MENU_SAVE, MA_None, };
 static MenuVerify_t M_RESETPLAYER = { CURSOR_CENTER_3LINE, MENU_CLOSE, MA_None, };
+
+#ifdef DUKEVR_OPENXR
+static MenuVerify_t M_VRHUDRESETVERIFY = { CURSOR_CENTER_2LINE, MENU_VRHUDSETUP, MA_None, };
+#endif
 
 static MenuVerify_t M_COLCORRRESETVERIFY = { CURSOR_CENTER_2LINE, MENU_COLCORR, MA_None, };
 static MenuVerify_t M_KEYSRESETVERIFY = { CURSOR_CENTER_2LINE, MENU_KEYBOARDSETUP, MA_None, };
@@ -1649,6 +1683,11 @@ static Menu_t Menus[] = {
     { &M_COLCORR, MENU_COLCORR_INGAME, MENU_CLOSE, MA_Return, Menu },
     { &M_SCREENSETUP, MENU_SCREENSETUP, MENU_DISPLAYSETUP, MA_Return, Menu },
     { &M_DISPLAYSETUP, MENU_DISPLAYSETUP, MENU_OPTIONS, MA_Return, Menu },
+#ifdef DUKEVR_OPENXR
+    { &M_VRHUDSETUP, MENU_VRHUDSETUP, MENU_MAIN, MA_Return, Menu },
+    { &M_VRHUDWEAPON, MENU_VRHUDWEAPON, MENU_VRHUDSETUP, MA_Return, Menu },
+    { &M_VRHUDSTATUSBAR, MENU_VRHUDSTATUSBAR, MENU_VRHUDSETUP, MA_Return, Menu },
+#endif
 #if defined POLYMER
     { &M_POLYMER, MENU_POLYMER, MENU_RENDERER, MA_Return, Menu },
 #endif
@@ -1696,6 +1735,9 @@ static Menu_t Menus[] = {
     { &M_KEYOVERRIDEVERIFY, MENU_KEYOVERRIDEVERIFY, MENU_KEYBOARDKEYS, MA_None, Verify },
     { &M_ADULTPASSWORD, MENU_ADULTPASSWORD, MENU_GAMESETUP, MA_None, TextForm },
     { &M_RESETPLAYER, MENU_RESETPLAYER, MENU_CLOSE, MA_None, Verify },
+#ifdef DUKEVR_OPENXR
+    { &M_VRHUDRESETVERIFY, MENU_VRHUDRESETVERIFY, MENU_VRHUDSETUP, MA_None, Verify },
+#endif
     { &M_BUYDUKE, MENU_BUYDUKE, MENU_EPISODE, MA_Return, Message },
     { &M_NETWORK, MENU_NETWORK, MENU_MAIN, MA_Return, Menu },
     { &M_PLAYER, MENU_PLAYER, MENU_OPTIONS, MA_Return, Menu },
@@ -3278,6 +3320,10 @@ static void Menu_PreDraw(MenuID_t cm, MenuEntry_t* entry, const vec2_t origin)
         videoFadeToBlack(1);
         Menu_DrawVerifyPrompt(origin.x, origin.y, "Reset keys to defaults?");
         break;
+    case MENU_VRHUDRESETVERIFY:
+        videoFadeToBlack(1);
+        Menu_DrawVerifyPrompt(origin.x, origin.y, "Reset VR HUD positions?");
+        break;
     case MENU_KEYSCLASSICVERIFY:
         videoFadeToBlack(1);
         Menu_DrawVerifyPrompt(origin.x, origin.y, "Reset keys to classic defaults?");
@@ -4340,9 +4386,15 @@ static void Menu_Custom2ColScreen(/*MenuEntry_t *entry*/)
 static int32_t Menu_EntryRangeInt32Modify(MenuEntry_t *entry, int32_t newValue)
 {
     if (entry == &ME_SCREENSETUP_SCREENSIZE)
+    {
         G_SetViewportShrink((newValue - vpsize) * 4);
+        CONFIG_SaveVRHudSettings();
+    }
     else if (entry == &ME_SCREENSETUP_SBARSIZE)
+    {
         G_SetStatusBarScale(newValue);
+        CONFIG_SaveVRHudSettings();
+    }
     else if (entry == &ME_SOUND_VOLUME_MASTER)
         FX_SetVolume(newValue);
     else if (entry == &ME_SOUND_VOLUME_MUSIC)
@@ -4616,6 +4668,15 @@ static void Menu_Verify(int32_t input)
     case MENU_KEYSRESETVERIFY:
         if (input)
             CONFIG_SetDefaultKeys(keydefaults);
+        break;
+    case MENU_VRHUDRESETVERIFY:
+        if (input) {
+            ud.vr_weapon_offset_x = 0;
+            ud.vr_weapon_offset_y = 0;
+            ud.vr_statusbar_offset_x = 0;
+            ud.vr_statusbar_offset_y = 0;
+            CONFIG_WriteSetup(0);
+        }
         break;
     case MENU_KEYSCLASSICVERIFY:
         if (input)
@@ -6654,6 +6715,7 @@ static void Menu_Recurse(MenuID_t cm, const vec2_t origin)
     case MENU_COLCORRRESETVERIFY:
     case MENU_KEYSRESETVERIFY:
     case MENU_KEYSCLASSICVERIFY:
+    case MENU_VRHUDRESETVERIFY:
     case MENU_JOYDEFAULTVERIFY:
     case MENU_KEYOVERRIDEVERIFY:
     case MENU_ADULTPASSWORD:

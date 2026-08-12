@@ -348,7 +348,6 @@ static void G_DrawAltDigiNum(int32_t x, int32_t y, int32_t n, char s, int32_t cs
     int32_t shd = (y < 0);
 
     const int32_t sbscale = sbarsc(65536);
-
     if (rev) x = -x;
     if (shd) y = -y;
 

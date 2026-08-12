@@ -26,6 +26,10 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include "input.h"
 #include "savegame.h"
 
+#ifdef DUKEVR_OPENXR
+#include "dukevr_openxr.h"
+#endif
+
 #ifdef __ANDROID__
 #include "android.h"
 #endif
@@ -1842,6 +1846,8 @@ static int P_DisplayFist(int const fistShade)
     int const baseY       = klabs(pPlayer->look_ang) / 9;
     int const fistX       = 222 + baseX - fistInc;
     int const fistY       = 194 + baseY + (sintable[((6 + fistInc) << 7) & 2047] >> 9);
+    int const hudFistX    = fistX;
+    int const hudFistY    = fistY;
     int const fistZoom    = clamp(65536 - (sintable[(512 + (fistInc << 6)) & 2047] << 2), 40920, 90612);
     int const fistPal     = P_GetHudPal(pPlayer);
     int       wx[2]       = { windowxy1.x, windowxy2.x };
@@ -1854,7 +1860,7 @@ static int P_DisplayFist(int const fistShade)
 #endif
 
     guniqhudid = W_FIST;
-    rotatesprite(fistX << 16, fistY << 16, fistZoom, 0, FIST, fistShade, fistPal, 2 | RS_LERP, wx[0],wy[0], wx[1],wy[1]);
+    rotatesprite(hudFistX << 16, hudFistY << 16, fistZoom, 0, FIST, fistShade, fistPal, 2 | RS_LERP, wx[0],wy[0], wx[1],wy[1]);
     guniqhudid = 0;
 
     return 1;
@@ -2265,6 +2271,7 @@ void P_DisplayWeapon(void)
     int weaponX       = (160) - 90;
     int weaponY       = klabs(pPlayer->look_ang) / 9;
     int weaponYOffset = 80 - (pPlayer->weapon_pos * pPlayer->weapon_pos);
+
     int weaponShade   = sprite[pPlayer->i].shade <= 24 ? sprite[pPlayer->i].shade : 24;
 
     // fixes trying to interpolate between the weapon_pos 0 and fully lowered positions when placing tripbombs
@@ -3206,6 +3213,10 @@ void P_GetInput(int const playerNum)
 
         thisPlayer.lastViewUpdate = 0;
         localInput = {};
+#ifdef DUKEVR_OPENXR
+        DukeVROpenXR_ConsumeSnapTurn();
+        DukeVROpenXR_ConsumeWeaponChange();
+#endif
         localInput.bits    = (((int32_t)g_gameQuit) << SK_GAMEQUIT);
         localInput.extbits = BIT(EK_CHAT_MODE);
 
@@ -3229,6 +3240,10 @@ void P_GetInput(int const playerNum)
     }
 
     CONTROL_GetInput(&info);
+
+#ifdef DUKEVR_OPENXR
+    DukeVROpenXR_ApplyGameplayInput(&info);
+#endif
 
     if (ud.config.MouseBias)
     {
@@ -3316,6 +3331,14 @@ void P_GetInput(int const playerNum)
     input.q16horz = fix16_ssub(input.q16horz, fix16_from_float(scaleToInterval(info.dpitch * 16.0 / analogExtent)));
     input.svel -= lrint(scaleToInterval(info.dx * keyMove / analogExtent));
     input.fvel -= lrint(scaleToInterval(info.dz * keyMove / analogExtent));
+
+#ifdef DUKEVR_OPENXR
+    /* Right-stick horizontal movement is a one-shot 30-degree snap turn.
+     * Add it after continuous mouse/head input has been built so it cannot
+     * be overwritten by the normal turn path. */
+    input.q16avel = fix16_sadd(input.q16avel,
+        fix16_from_int(DukeVROpenXR_ConsumeSnapTurn() * 171));
+#endif
 
     if (BUTTON(gamefunc_Strafe))
     {

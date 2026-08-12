@@ -325,6 +325,10 @@ void CONFIG_SetDefaults(void)
     ud.statusbarflags         = STATUSBAR_NOSHRINK;
     ud.statusbarmode          = 1;
     ud.statusbarscale         = 100;
+    ud.vr_weapon_offset_x    = 0;
+    ud.vr_weapon_offset_y    = 0;
+    ud.vr_statusbar_offset_x = 0;
+    ud.vr_statusbar_offset_y = 0;
     ud.team                   = 0;
     ud.textscale              = 200;
     ud.viewbob                = 1;
@@ -785,6 +789,24 @@ int CONFIG_ReadSetup(void)
     SCRIPT_GetNumber(ud.config.scripthandle, "Screen Setup", "ScreenHeight", &ud.setup.ydim);
     SCRIPT_GetNumber(ud.config.scripthandle, "Screen Setup", "ScreenMode", &ud.setup.fullscreen);
     SCRIPT_GetNumber(ud.config.scripthandle, "Screen Setup", "ScreenWidth", &ud.setup.xdim);
+    SCRIPT_GetNumber(ud.config.scripthandle, "VR Setup", "WeaponOffsetX", &ud.vr_weapon_offset_x);
+    SCRIPT_GetNumber(ud.config.scripthandle, "VR Setup", "WeaponOffsetY", &ud.vr_weapon_offset_y);
+    SCRIPT_GetNumber(ud.config.scripthandle, "VR Setup", "StatusBarOffsetX", &ud.vr_statusbar_offset_x);
+    SCRIPT_GetNumber(ud.config.scripthandle, "VR Setup", "StatusBarOffsetY", &ud.vr_statusbar_offset_y);
+    SCRIPT_GetNumber(ud.config.scripthandle, "VR Setup", "StatusBarScreenSize", &ud.screen_size);
+    SCRIPT_GetNumber(ud.config.scripthandle, "VR Setup", "StatusBarScale", &ud.statusbarscale);
+    SCRIPT_GetNumber(ud.config.scripthandle, "VR Setup", "StatusBarMode", &ud.statusbarmode);
+    SCRIPT_GetNumber(ud.config.scripthandle, "VR Setup", "StatusBarAltHud", &ud.althud);
+    SCRIPT_GetNumber(ud.config.scripthandle, "VR Setup", "StatusBarCustom", &ud.statusbarcustom);
+    ud.screen_size = clamp(ud.screen_size, 0, 64);
+    ud.statusbarscale = clamp(ud.statusbarscale, 50, 100);
+    ud.statusbarmode = clamp(ud.statusbarmode, 0, 1);
+    ud.althud = clamp(ud.althud, 0, 1);
+    ud.statusbarcustom = max(ud.statusbarcustom, 0);
+    LOG_F(INFO, "Loaded VR HUD settings from %s: weapon=%d/%d status=%d/%d state=size:%d scale:%d mode:%d alt:%d custom:%d",
+        g_setupFileName, ud.vr_weapon_offset_x, ud.vr_weapon_offset_y,
+        ud.vr_statusbar_offset_x, ud.vr_statusbar_offset_y, ud.screen_size,
+        ud.statusbarscale, ud.statusbarmode, ud.althud, ud.statusbarcustom);
     vec2_t windowPos;
     if (!SCRIPT_GetNumber(ud.config.scripthandle, "Screen Setup", "WindowPosX", &windowPos.x)
         && !SCRIPT_GetNumber(ud.config.scripthandle, "Screen Setup", "WindowPosY", &windowPos.y))
@@ -835,9 +857,71 @@ void CONFIG_ReadSettings(void)
 
     OSD_Exec(tempbuf);
 
+    /* settings.cfg contains the regular Eduke32 cvars and is executed after
+     * eduke32.cfg.  Keep the VR status-bar state authoritative so an older
+     * r_size/hud_* entry from that file cannot undo the values saved by the
+     * +/- controls in the VR Setup section. */
+    if (ud.config.scripthandle >= 0)
+    {
+        SCRIPT_GetNumber(ud.config.scripthandle, "VR Setup", "StatusBarScreenSize", &ud.screen_size);
+        SCRIPT_GetNumber(ud.config.scripthandle, "VR Setup", "StatusBarScale", &ud.statusbarscale);
+        SCRIPT_GetNumber(ud.config.scripthandle, "VR Setup", "StatusBarMode", &ud.statusbarmode);
+        SCRIPT_GetNumber(ud.config.scripthandle, "VR Setup", "StatusBarAltHud", &ud.althud);
+        SCRIPT_GetNumber(ud.config.scripthandle, "VR Setup", "StatusBarCustom", &ud.statusbarcustom);
+        ud.screen_size = clamp(ud.screen_size, 0, 64);
+        ud.statusbarscale = clamp(ud.statusbarscale, 50, 100);
+        ud.statusbarmode = clamp(ud.statusbarmode, 0, 1);
+        ud.althud = clamp(ud.althud, 0, 1);
+        ud.statusbarcustom = max(ud.statusbarcustom, 0);
+        G_UpdateScreenArea();
+        LOG_F(INFO, "Applied VR HUD settings after settings.cfg: state=size:%d scale:%d mode:%d alt:%d custom:%d",
+            ud.screen_size, ud.statusbarscale, ud.statusbarmode, ud.althud, ud.statusbarcustom);
+    }
+
     ud.config.setupread = 2;
 
     return;
+}
+
+void CONFIG_SaveVRHudSettings(void)
+{
+    if (!ud.config.setupread)
+        return;
+
+    if (ud.config.scripthandle < 0)
+    {
+        if (buildvfs_exists(g_setupFileName))
+            ud.config.scripthandle = SCRIPT_Load(g_setupFileName);
+        else
+            ud.config.scripthandle = SCRIPT_Init(g_setupFileName);
+    }
+
+    if (ud.config.scripthandle < 0)
+    {
+        LOG_F(ERROR, "Unable to save VR HUD settings: configuration handle unavailable");
+        return;
+    }
+
+    SCRIPT_PutNumber(ud.config.scripthandle, "VR Setup", "WeaponOffsetX", ud.vr_weapon_offset_x, FALSE, FALSE);
+    SCRIPT_PutNumber(ud.config.scripthandle, "VR Setup", "WeaponOffsetY", ud.vr_weapon_offset_y, FALSE, FALSE);
+    SCRIPT_PutNumber(ud.config.scripthandle, "VR Setup", "StatusBarOffsetX", ud.vr_statusbar_offset_x, FALSE, FALSE);
+    SCRIPT_PutNumber(ud.config.scripthandle, "VR Setup", "StatusBarOffsetY", ud.vr_statusbar_offset_y, FALSE, FALSE);
+    SCRIPT_PutNumber(ud.config.scripthandle, "VR Setup", "StatusBarScreenSize", ud.screen_size, FALSE, FALSE);
+    SCRIPT_PutNumber(ud.config.scripthandle, "VR Setup", "StatusBarScale", ud.statusbarscale, FALSE, FALSE);
+    SCRIPT_PutNumber(ud.config.scripthandle, "VR Setup", "StatusBarMode", ud.statusbarmode, FALSE, FALSE);
+    SCRIPT_PutNumber(ud.config.scripthandle, "VR Setup", "StatusBarAltHud", ud.althud, FALSE, FALSE);
+    SCRIPT_PutNumber(ud.config.scripthandle, "VR Setup", "StatusBarCustom", ud.statusbarcustom, FALSE, FALSE);
+    SCRIPT_Save(ud.config.scripthandle, g_setupFileName);
+    /* Keep the standard cvars in settings.cfg synchronized too. Otherwise
+     * an older r_size/hud_scale/hud_althud value remains on disk and can
+     * appear to undo the VR values on the next launch. CONFIG_ReadSettings
+     * still reapplies the VR section after executing that file. */
+    CONFIG_WriteSettings();
+
+    LOG_F(INFO, "Saved VR HUD settings: weapon=%d/%d status=%d/%d state=size:%d scale:%d mode:%d alt:%d custom:%d",
+        ud.vr_weapon_offset_x, ud.vr_weapon_offset_y,
+        ud.vr_statusbar_offset_x, ud.vr_statusbar_offset_y, ud.screen_size,
+        ud.statusbarscale, ud.statusbarmode, ud.althud, ud.statusbarcustom);
 }
 
 void CONFIG_WriteSettings(void) // save binds and aliases to <cfgname>_settings.cfg
@@ -913,7 +997,12 @@ void CONFIG_WriteSetup(uint32_t flags)
     if (!ud.config.setupread) return;
 
     if (ud.config.scripthandle < 0)
-        ud.config.scripthandle = SCRIPT_Init(g_setupFileName);
+    {
+        if (buildvfs_exists(g_setupFileName))
+            ud.config.scripthandle = SCRIPT_Load(g_setupFileName);
+        else
+            ud.config.scripthandle = SCRIPT_Init(g_setupFileName);
+    }
 
     SCRIPT_PutNumber(ud.config.scripthandle, "Misc", "Executions", ud.executions, FALSE, FALSE);
 
@@ -932,6 +1021,16 @@ void CONFIG_WriteSetup(uint32_t flags)
     SCRIPT_PutNumber(ud.config.scripthandle, "Screen Setup", "ScreenMode", ud.setup.fullscreen, FALSE, FALSE);
     SCRIPT_PutNumber(ud.config.scripthandle, "Screen Setup", "ScreenWidth", ud.setup.xdim, FALSE, FALSE);
 
+    SCRIPT_PutNumber(ud.config.scripthandle, "VR Setup", "WeaponOffsetX", ud.vr_weapon_offset_x, FALSE, FALSE);
+    SCRIPT_PutNumber(ud.config.scripthandle, "VR Setup", "WeaponOffsetY", ud.vr_weapon_offset_y, FALSE, FALSE);
+    SCRIPT_PutNumber(ud.config.scripthandle, "VR Setup", "StatusBarOffsetX", ud.vr_statusbar_offset_x, FALSE, FALSE);
+    SCRIPT_PutNumber(ud.config.scripthandle, "VR Setup", "StatusBarOffsetY", ud.vr_statusbar_offset_y, FALSE, FALSE);
+    SCRIPT_PutNumber(ud.config.scripthandle, "VR Setup", "StatusBarScreenSize", ud.screen_size, FALSE, FALSE);
+    SCRIPT_PutNumber(ud.config.scripthandle, "VR Setup", "StatusBarScale", ud.statusbarscale, FALSE, FALSE);
+    SCRIPT_PutNumber(ud.config.scripthandle, "VR Setup", "StatusBarMode", ud.statusbarmode, FALSE, FALSE);
+    SCRIPT_PutNumber(ud.config.scripthandle, "VR Setup", "StatusBarAltHud", ud.althud, FALSE, FALSE);
+    SCRIPT_PutNumber(ud.config.scripthandle, "VR Setup", "StatusBarCustom", ud.statusbarcustom, FALSE, FALSE);
+
     if (g_grpNamePtr && !g_addonNum)
         SCRIPT_PutString(ud.config.scripthandle, "Setup", "SelectedGRP", g_grpNamePtr);
 
@@ -944,6 +1043,10 @@ void CONFIG_WriteSetup(uint32_t flags)
     {
         SCRIPT_Save(ud.config.scripthandle, g_setupFileName);
         SCRIPT_Free(ud.config.scripthandle);
+        /* SCRIPT_Free destroys the handle, so make the next CONFIG_ReadSetup
+         * call load the file again instead of treating the dangling handle as
+         * an already-loaded configuration. */
+        ud.config.scripthandle = -1;
         return;
     }
 
@@ -1038,7 +1141,14 @@ void CONFIG_WriteSetup(uint32_t flags)
     SCRIPT_Save(ud.config.scripthandle, g_setupFileName);
 
     if ((flags & 2) == 0)
+    {
         SCRIPT_Free(ud.config.scripthandle);
+        /* The full save path also destroys the script handle.  Leaving the
+         * old value here makes the next save reuse freed configuration data;
+         * this is especially easy to hit after changing VR HUD settings or
+         * leaving a HUD reposition screen. */
+        ud.config.scripthandle = -1;
+    }
 
     LOG_F(INFO, "Wrote %s",g_setupFileName);
     CONFIG_WriteSettings();

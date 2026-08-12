@@ -35,6 +35,10 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include "sbar.h"
 #include "screens.h"
 
+#ifdef DUKEVR_OPENXR
+#include "dukevr_openxr.h"
+#endif
+
 #define COLOR_RED redcol
 #define COLOR_WHITE whitecol
 
@@ -1054,6 +1058,9 @@ void G_DisplayRest(int32_t smoothratio)
                 G_DrawCameraText(pp->newowner);
             else
             {
+#ifdef DUKEVR_OPENXR
+                int const dukeVrWeaponLayer = DukeVROpenXR_BeginHudLayer(DUKEVR_OPENXR_HUD_LAYER_WEAPON);
+#endif
                 P_DisplayWeapon();
 #ifdef SPLITSCREEN_MOD_HACKS
                 if (pp2)  // HACK
@@ -1063,6 +1070,10 @@ void G_DisplayRest(int32_t smoothratio)
                     P_DisplayWeapon();
                     screenpeek = oscreenpeek;
                 }
+#endif
+#ifdef DUKEVR_OPENXR
+                if (dukeVrWeaponLayer)
+                    DukeVROpenXR_EndHudLayer();
 #endif
 
                 if (pp->over_shoulder_on == 0)
@@ -1148,6 +1159,10 @@ void G_DisplayRest(int32_t smoothratio)
         }
     }
 
+#ifdef DUKEVR_OPENXR
+    int const dukeVrStatusLayer = DukeVROpenXR_BeginHudLayer(DUKEVR_OPENXR_HUD_LAYER_STATUS);
+#endif
+
     if (pp->invdisptime > 0) G_DrawInventory(pp);
 
     if (VM_OnEvent(EVENT_DISPLAYSBAR, g_player[screenpeek].ps->i, screenpeek) == 0)
@@ -1160,6 +1175,11 @@ void G_DisplayRest(int32_t smoothratio)
         G_DrawStatusBar(1);
         G_PrintGameQuotes(1);
     }
+#endif
+
+#ifdef DUKEVR_OPENXR
+    if (dukeVrStatusLayer)
+        DukeVROpenXR_EndHudLayer();
 #endif
 
     G_PrintGameQuotes(screenpeek);
@@ -1383,7 +1403,14 @@ void G_DisplayRest(int32_t smoothratio)
         if (g_player[myconnectindex].ps->gm&MODE_TYPE)
             Net_SendMessage();
         else
-            M_DisplayMenus();
+#ifdef DUKEVR_OPENXR
+            /* VR HUD calibration is a live preview: while the controller grip
+             * is held, leave the mission HUD visible and suppress only the
+             * menu overlay. Releasing the grip clears the preview flag, so
+             * the calibration menu returns with the saved position. */
+            if (!DukeVRHudRepositionPreviewActive())
+#endif
+                M_DisplayMenus();
     }
 
     {

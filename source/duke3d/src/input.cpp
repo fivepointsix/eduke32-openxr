@@ -30,6 +30,10 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include "input.h"
 #include "menus.h"
 
+#ifdef DUKEVR_OPENXR
+#include "dukevr_openxr.h"
+#endif
+
 int32_t I_CheckAllInput(void)
 {
     return KB_KeyWaiting() || MOUSE_GetButtons() || JOYSTICK_GetButtons()
@@ -47,6 +51,9 @@ void I_ClearAllInput(void)
     JOYSTICK_ClearAllButtons();
     CONTROL_ClearAllButtons();
     mouseAdvanceClickState();
+#ifdef DUKEVR_OPENXR
+    DukeVROpenXR_ClearMenuInput();
+#endif
 }
 
 void I_ClearLast(void) { CONTROL_ClearUserInput(nullptr); }

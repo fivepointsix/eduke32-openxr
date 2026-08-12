@@ -9,6 +9,7 @@ param(
     [int]$Repeat = 1,
     [switch]$EnterMission,
     [switch]$StartMission,
+    [switch]$TestStatusBarPersistence,
     [ValidateSet('None', 'Options', 'Quit')]
     [string]$InGameMenuAction = 'None',
     [switch]$KeepRunning,
@@ -32,7 +33,7 @@ $executable = Join-Path $buildRoot 'eduke32.exe'
 $logFile = Join-Path $buildRoot 'eduke32.log'
 $resultsRoot = Join-Path $buildRoot 'test-results'
 $runtimeManifest = $null
-$needsMissionInput = $EnterMission
+$needsMissionInput = $EnterMission -or $TestStatusBarPersistence
 $needsKeyboardInput = $needsMissionInput
 $runMission = $StartMission -or $needsMissionInput
 
@@ -41,6 +42,9 @@ if ($InGameMenuAction -ne 'None' -and -not ($StartMission -or $EnterMission)) {
 }
 if ($InGameMenuAction -ne 'None' -and $KeepRunning) {
     throw "-KeepRunning cannot be combined with -InGameMenuAction."
+}
+if ($TestStatusBarPersistence -and $Mode -ne 'Desktop') {
+    throw "-TestStatusBarPersistence currently requires -Mode Desktop."
 }
 
 if ($Mode -eq 'OpenXR') {
@@ -118,6 +122,15 @@ public static class DukeVrTestInput {
     public const uint KEYEVENTF_KEYUP = 0x0002;
     public const uint WM_KEYDOWN = 0x0100;
     public const uint WM_KEYUP = 0x0101;
+
+    public static void SendKey(IntPtr hWnd, byte key, bool shift) {
+        if (shift) keybd_event(0x10, 0, 0, UIntPtr.Zero);
+        keybd_event(key, 0, 0, UIntPtr.Zero);
+        keybd_event(key, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
+        if (shift) keybd_event(0x10, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
+        PostKey(hWnd, WM_KEYDOWN, key);
+        PostKey(hWnd, WM_KEYUP, key);
+    }
 }
 '@
 }
@@ -136,7 +149,7 @@ if (-not (Test-Path -LiteralPath $executable)) {
 New-Item -ItemType Directory -Force -Path $resultsRoot | Out-Null
 
 $effectiveGameArguments = @($GameArguments)
-if ($StartMission -and $effectiveGameArguments -notcontains '-l1') {
+if ($runMission -and $effectiveGameArguments -notcontains '-l1') {
     $effectiveGameArguments += @('-l1', '-s1')
 }
 $argumentText = ($effectiveGameArguments | ForEach-Object { ConvertTo-ProcessArgument $_ }) -join ' '
@@ -179,6 +192,9 @@ for ($run = 1; $run -le $Repeat; $run++) {
     if ($InGameMenuAction -ne 'None') {
         $startInfo.EnvironmentVariables['DUKEVR_TEST_MENU'] = $InGameMenuAction.ToLowerInvariant()
     }
+    if ($TestStatusBarPersistence) {
+        $startInfo.EnvironmentVariables['DUKEVR_TEST_STATUS_PERSIST'] = '1'
+    }
 
     $process = New-Object Diagnostics.Process
     $process.StartInfo = $startInfo
@@ -192,6 +208,8 @@ for ($run = 1; $run -le $Repeat; $run++) {
     $reachedGameplay = $false
     $reachedStereoGameplay = $false
     $missionKeysSent = $false
+    $statusPersistenceKeysSent = $false
+    $statusPersistenceReady = -not $TestStatusBarPersistence
     $menuActionSent = $InGameMenuAction -ne 'None'
     $menuActionCompleted = $InGameMenuAction -eq 'None'
     $xrRuntimeInitialized = $false
@@ -233,6 +251,36 @@ for ($run = 1; $run -le $Repeat; $run++) {
                 $missionKeysSent = $true
             }
 
+            if ($TestStatusBarPersistence -and $run -eq 1 -and $reachedGameplay -and
+                -not $statusPersistenceKeysSent) {
+                $process.Refresh()
+                if ($process.MainWindowHandle -eq [IntPtr]::Zero) {
+                    Start-Sleep -Milliseconds 250
+                    continue
+                }
+
+                [void][DukeVrTestInput]::SetForegroundWindow($process.MainWindowHandle)
+                Write-Host ("  Sending status-bar persistence input to window 0x{0:X}" -f $process.MainWindowHandle.ToInt64())
+                Start-Sleep -Milliseconds 250
+                # One unshifted minus changes the status-bar presentation state;
+                # shifted minus changes its scale. The second run verifies that
+                # both values were loaded instead of changing them again.
+                [DukeVrTestInput]::SendKey($process.MainWindowHandle, [byte]0xBD, $false)
+                Start-Sleep -Milliseconds 250
+                [DukeVrTestInput]::SendKey($process.MainWindowHandle, [byte]0xBD, $true)
+                $statusPersistenceKeysSent = $true
+            }
+
+            if ($TestStatusBarPersistence) {
+                if ($run -eq 1) {
+                    $statusPersistenceReady = $logText -match 'Saved VR HUD settings: weapon=17/-9 status=13/-7 state=size:4 scale:95 mode:1 alt:0 custom:0'
+                }
+                elseif ($run -eq 2) {
+                    $statusPersistenceReady = $logText -match 'Loaded VR HUD settings from .*weapon=17/-9 status=13/-7 state=size:4 scale:95 mode:1 alt:0 custom:0' -and
+                        $logText -match 'Applied VR HUD settings after settings\.cfg: state=size:4 scale:95 mode:1 alt:0 custom:0'
+                }
+            }
+
             if ($InGameMenuAction -eq 'Options' -and $menuActionSent -and
                 $logText -match 'OpenXR menu state: menu=202') {
                 $menuActionCompleted = $true
@@ -247,8 +295,11 @@ for ($run = 1; $run -le $Repeat; $run++) {
                 $reachedGameplay -and -not $reachedStereoGameplay
             $waitingForMenuAction = $InGameMenuAction -ne 'None' -and
                 -not $menuActionCompleted
+            $waitingForStatusPersistence = $TestStatusBarPersistence -and
+                -not $statusPersistenceReady
             if ($reachedGameplay -and -not $KeepRunning -and
-                -not $waitingForStereo -and -not $waitingForMenuAction) {
+                -not $waitingForStereo -and -not $waitingForMenuAction -and
+                -not $waitingForStatusPersistence) {
                 if ($Mode -eq 'OpenXR' -and (-not $xrRuntimeInitialized -or -not $xrGraphicsInitialized)) {
                     $status = 'ReachedGameplayWithoutXR'
                 }
@@ -338,6 +389,7 @@ for ($run = 1; $run -le $Repeat; $run++) {
         reachedGameplay = $reachedGameplay
         reachedStereoGameplay = $reachedStereoGameplay
         reachedQuitMenu = $reachedQuitMenu
+        statusPersistenceReady = $statusPersistenceReady
         inGameMenuAction = $InGameMenuAction
         inGameMenuActionSent = $menuActionSent
         inGameMenuActionCompleted = $menuActionCompleted
@@ -355,6 +407,11 @@ for ($run = 1; $run -le $Repeat; $run++) {
     Write-Host ("Run {0}: {1} (menu={2}, XR runtime={3}, XR graphics={4})" -f
         $run, $status, $reachedMenu, $xrRuntimeInitialized, $xrGraphicsInitialized)
     Write-Host "  Results: $runDirectory"
+}
+
+if ($TestStatusBarPersistence -and ($allResults | Where-Object { -not $_.statusPersistenceReady })) {
+    Write-Error 'Status-bar persistence test did not observe the expected saved and reloaded values.'
+    exit 1
 }
 
     if ($allResults | Where-Object {

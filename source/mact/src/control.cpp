@@ -19,6 +19,10 @@
 #include "osd.h"
 #include "pragmas.h"
 
+#ifdef DUKEVR_OPENXR
+#include "dukevr_openxr.h"
+#endif
+
 #ifdef __ANDROID__
 #include "android.h"
 #endif
@@ -799,6 +803,14 @@ UserInput *CONTROL_GetUserInput(UserInput *info)
 
     direction newdir = dir_None;
 
+#ifdef DUKEVR_OPENXR
+    int vrDirection = 0;
+    int vrAdvance = 0;
+    int vrBack = 0;
+    int vrEscape = 0;
+    DukeVROpenXR_GetMenuInput(&vrDirection, &vrAdvance, &vrBack, &vrEscape);
+#endif
+
     if ((joyAxes[CONTROLLER_AXIS_LEFTY].axis.digital == -1 && SCALEAXIS(LEFTY) <= -SATU(LEFTY))
         || (JOYSTICK_GetControllerButtons() & (1 << CONTROLLER_BUTTON_DPAD_UP)))
         newdir = dir_Up;
@@ -811,6 +823,13 @@ UserInput *CONTROL_GetUserInput(UserInput *info)
     else if ((joyAxes[CONTROLLER_AXIS_LEFTX].axis.digital == 1 && SCALEAXIS(LEFTX) >= SATU(LEFTX))
                 || (JOYSTICK_GetControllerButtons() & (1 << CONTROLLER_BUTTON_DPAD_RIGHT)))
         newdir = dir_Right;
+
+#ifdef DUKEVR_OPENXR
+    if (vrDirection == 1) newdir = dir_Up;
+    else if (vrDirection == 2) newdir = dir_Down;
+    else if (vrDirection == 3) newdir = dir_Left;
+    else if (vrDirection == 4) newdir = dir_Right;
+#endif
 
     // allow the user to press the dpad as fast as they like without being rate limited
     if (newdir == dir_None)
@@ -834,6 +853,11 @@ UserInput *CONTROL_GetUserInput(UserInput *info)
                     || (JOYSTICK_GetControllerButtons() & (1 << CONTROLLER_BUTTON_A));
     info->b_return   = KB_KeyPressed(sc_Escape) || (MOUSE_GetButtons() & M_RIGHTBUTTON) || (JOYSTICK_GetControllerButtons() & (1 << CONTROLLER_BUTTON_B));
     info->b_escape = KB_KeyPressed(sc_Escape) || (JOYSTICK_GetControllerButtons() & (1 << CONTROLLER_BUTTON_START));
+#ifdef DUKEVR_OPENXR
+    info->b_advance = info->b_advance || vrAdvance;
+    info->b_return = info->b_return || vrBack;
+    info->b_escape = info->b_escape || vrEscape;
+#endif
 
 #if defined(GEKKO)
     if (JOYSTICK_GetButtons()&(WII_A))
@@ -905,6 +929,9 @@ void CONTROL_ClearUserInput(UserInput * info)
         }
 
         userInput.buttonCleared[0] = true;
+#ifdef DUKEVR_OPENXR
+        DukeVROpenXR_ClearMenuDirection();
+#endif
     }
 
     if (info->b_advance)
@@ -913,6 +940,9 @@ void CONTROL_ClearUserInput(UserInput * info)
         KB_ClearKeyDown(sc_Enter);
         MOUSE_ClearButton(M_LEFTBUTTON);
         userInput.buttonCleared[1] = true;
+#ifdef DUKEVR_OPENXR
+        DukeVROpenXR_ClearMenuAdvance();
+#endif
     }
 
     if (info->b_return)
@@ -920,12 +950,18 @@ void CONTROL_ClearUserInput(UserInput * info)
         KB_ClearKeyDown(sc_Escape);
         MOUSE_ClearButton(M_RIGHTBUTTON);
         userInput.buttonCleared[2] = true;
+#ifdef DUKEVR_OPENXR
+        DukeVROpenXR_ClearMenuBack();
+#endif
     }
 
     if (info->b_escape)
     {
         KB_ClearKeyDown(sc_Escape);
         userInput.buttonCleared[3] = true;
+#ifdef DUKEVR_OPENXR
+        DukeVROpenXR_ClearMenuEscape();
+#endif
     }
     inputchecked = 1;
 }

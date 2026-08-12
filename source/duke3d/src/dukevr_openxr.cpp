@@ -5,6 +5,8 @@
 #endif
 #include "baselayer.h"
 #include "glbuild.h"
+#include "control.h"
+#include "function.h"
 
 #ifdef OPENXR
 
@@ -38,6 +40,7 @@ typedef struct DukeVROVRSwapChain {
 #endif
 
 #define DUKEVR_OPENXR_MAX_IMAGES 16
+#define DUKEVR_OPENXR_MOVABLE_LAYERS 2
 
 typedef struct {
     XrInstance instance;
@@ -46,14 +49,55 @@ typedef struct {
     XrSpace space;
     XrSpace view_space;
     XrSessionState session_state;
+    XrActionSet action_set;
+    XrAction grip_action;
+    XrAction pose_action;
+    XrAction thumbstick_action;
+    XrAction trigger_action;
+    XrAction primary_action;
+    XrAction secondary_action;
+    XrAction thumbstick_click_action;
+    XrAction menu_action;
+    XrPath hand_paths[2];
+    XrSpace hand_spaces[2];
+    int actions_created;
+    int actions_attached;
+    int controller_valid[2];
+    int controller_grip[2];
+    float controller_thumbstick[2][2];
+    float controller_trigger[2];
+    int controller_primary[2];
+    int controller_secondary[2];
+    int controller_thumbstick_click[2];
+    int controller_menu[2];
+    int previous_primary[2];
+    int previous_secondary[2];
+    int previous_trigger[2];
+    int previous_thumbstick_click[2];
+    int previous_menu[2];
+    int menu_direction;
+    int menu_direction_pending;
+    uint64_t menu_direction_next_repeat;
+    int menu_advance_pending;
+    int menu_back_pending;
+    int menu_escape_pending;
+    int snap_turn_latched;
+    int snap_turn_pending;
+    int weapon_stick_latched;
+    int weapon_change_pending;
+    float controller_position[2][3];
+    float controller_orientation[2][4];
     XrViewConfigurationView config_views[2];
     XrView views[2];
     XrSwapchain swapchains[2];
     XrSwapchain hud_swapchain;
+    XrSwapchain movable_swapchains[DUKEVR_OPENXR_MOVABLE_LAYERS];
     XrSwapchainImageOpenGLKHR images[2][DUKEVR_OPENXR_MAX_IMAGES];
     XrSwapchainImageOpenGLKHR hud_images[DUKEVR_OPENXR_MAX_IMAGES];
+    XrSwapchainImageOpenGLKHR movable_images[DUKEVR_OPENXR_MOVABLE_LAYERS][DUKEVR_OPENXR_MAX_IMAGES];
     uint32_t image_counts[2];
     uint32_t hud_image_count;
+    uint32_t movable_image_counts[DUKEVR_OPENXR_MOVABLE_LAYERS];
     XrTime predicted_display_time;
     XrCompositionLayerProjectionView layer_views[2];
     int initialized;
@@ -74,6 +118,9 @@ typedef struct {
     uint32_t hud_image_acquired;
     int hud_swapchain_acquired;
     int hud_content_submitted;
+    uint32_t movable_images_acquired[DUKEVR_OPENXR_MOVABLE_LAYERS];
+    int movable_swapchains_acquired[DUKEVR_OPENXR_MOVABLE_LAYERS];
+    int movable_content_submitted[DUKEVR_OPENXR_MOVABLE_LAYERS];
     GLuint eye_fbos[2];
     GLuint eye_depth[2];
     GLuint scene_fbos[2];
@@ -91,6 +138,14 @@ typedef struct {
     GLint saved_hud_read_framebuffer;
     GLint saved_hud_viewport[4];
     int hud_render_active;
+    GLuint movable_fbos[DUKEVR_OPENXR_MOVABLE_LAYERS];
+    GLuint movable_textures[DUKEVR_OPENXR_MOVABLE_LAYERS];
+    GLuint movable_depth[DUKEVR_OPENXR_MOVABLE_LAYERS];
+    GLuint movable_runtime_fbos[DUKEVR_OPENXR_MOVABLE_LAYERS];
+    int movable_target_width;
+    int movable_target_height;
+    int movable_render_active;
+    int movable_offsets[DUKEVR_OPENXR_MOVABLE_LAYERS][2];
     int hud_menu_scaled;
     GLint saved_draw_framebuffer;
     GLint saved_read_framebuffer;
@@ -152,6 +207,20 @@ static void OpenXRReleaseHudTarget(void) {
     gOpenXR.hud_render_active = 0;
 }
 
+static void OpenXRReleaseMovableTargets(void) {
+    glDeleteFramebuffers(DUKEVR_OPENXR_MOVABLE_LAYERS, gOpenXR.movable_fbos);
+    glDeleteFramebuffers(DUKEVR_OPENXR_MOVABLE_LAYERS, gOpenXR.movable_runtime_fbos);
+    glDeleteTextures(DUKEVR_OPENXR_MOVABLE_LAYERS, gOpenXR.movable_textures);
+    glDeleteRenderbuffers(DUKEVR_OPENXR_MOVABLE_LAYERS, gOpenXR.movable_depth);
+    memset(gOpenXR.movable_fbos, 0, sizeof(gOpenXR.movable_fbos));
+    memset(gOpenXR.movable_runtime_fbos, 0, sizeof(gOpenXR.movable_runtime_fbos));
+    memset(gOpenXR.movable_textures, 0, sizeof(gOpenXR.movable_textures));
+    memset(gOpenXR.movable_depth, 0, sizeof(gOpenXR.movable_depth));
+    gOpenXR.movable_target_width = 0;
+    gOpenXR.movable_target_height = 0;
+    gOpenXR.movable_render_active = 0;
+}
+
 static int OpenXRResultOK(XrResult result, const char* operation) {
     if (XR_SUCCEEDED(result))
         return 1;
@@ -190,6 +259,8 @@ static void OpenXRReset(void) {
     gOpenXR.space = XR_NULL_HANDLE;
     gOpenXR.view_space = XR_NULL_HANDLE;
     gOpenXR.hud_swapchain = XR_NULL_HANDLE;
+    for (int i = 0; i < DUKEVR_OPENXR_MOVABLE_LAYERS; ++i)
+        gOpenXR.movable_swapchains[i] = XR_NULL_HANDLE;
     gOpenXR.session_state = XR_SESSION_STATE_UNKNOWN;
     gOpenXR.current_eye = -1;
     gOpenXR.eye_offset_x[0] = -0.032f;
@@ -219,6 +290,7 @@ static void OpenXRReleaseGraphics(void) {
     initprintf("OpenXR: releasing graphics resources...");
     OpenXRReleaseSceneTargets();
     OpenXRReleaseHudTarget();
+    OpenXRReleaseMovableTargets();
     if (gOpenXR.eye_fbos[0] != 0 || gOpenXR.eye_fbos[1] != 0)
         glDeleteFramebuffers(2, gOpenXR.eye_fbos);
     if (gOpenXR.eye_depth[0] != 0 || gOpenXR.eye_depth[1] != 0)
@@ -232,9 +304,19 @@ static void OpenXRReleaseGraphics(void) {
     if (gOpenXR.hud_swapchain != XR_NULL_HANDLE)
         xrDestroySwapchain(gOpenXR.hud_swapchain);
     gOpenXR.hud_swapchain = XR_NULL_HANDLE;
+    for (i = 0; i < DUKEVR_OPENXR_MOVABLE_LAYERS; ++i) {
+        if (gOpenXR.movable_swapchains[i] != XR_NULL_HANDLE)
+            xrDestroySwapchain(gOpenXR.movable_swapchains[i]);
+        gOpenXR.movable_swapchains[i] = XR_NULL_HANDLE;
+    }
     if (gOpenXR.view_space != XR_NULL_HANDLE)
         xrDestroySpace(gOpenXR.view_space);
     gOpenXR.view_space = XR_NULL_HANDLE;
+    for (i = 0; i < 2; i++) {
+        if (gOpenXR.hand_spaces[i] != XR_NULL_HANDLE)
+            xrDestroySpace(gOpenXR.hand_spaces[i]);
+        gOpenXR.hand_spaces[i] = XR_NULL_HANDLE;
+    }
     if (gOpenXR.space != XR_NULL_HANDLE)
         xrDestroySpace(gOpenXR.space);
     if (gOpenXR.session != XR_NULL_HANDLE)
@@ -248,8 +330,41 @@ static void OpenXRReleaseGraphics(void) {
     gOpenXR.graphics_initialized = 0;
 }
 
+static void OpenXRReleaseActions(void) {
+    if (gOpenXR.menu_action != XR_NULL_HANDLE)
+        xrDestroyAction(gOpenXR.menu_action);
+    if (gOpenXR.thumbstick_click_action != XR_NULL_HANDLE)
+        xrDestroyAction(gOpenXR.thumbstick_click_action);
+    if (gOpenXR.secondary_action != XR_NULL_HANDLE)
+        xrDestroyAction(gOpenXR.secondary_action);
+    if (gOpenXR.primary_action != XR_NULL_HANDLE)
+        xrDestroyAction(gOpenXR.primary_action);
+    if (gOpenXR.trigger_action != XR_NULL_HANDLE)
+        xrDestroyAction(gOpenXR.trigger_action);
+    if (gOpenXR.thumbstick_action != XR_NULL_HANDLE)
+        xrDestroyAction(gOpenXR.thumbstick_action);
+    if (gOpenXR.pose_action != XR_NULL_HANDLE)
+        xrDestroyAction(gOpenXR.pose_action);
+    if (gOpenXR.grip_action != XR_NULL_HANDLE)
+        xrDestroyAction(gOpenXR.grip_action);
+    if (gOpenXR.action_set != XR_NULL_HANDLE)
+        xrDestroyActionSet(gOpenXR.action_set);
+    gOpenXR.pose_action = XR_NULL_HANDLE;
+    gOpenXR.grip_action = XR_NULL_HANDLE;
+    gOpenXR.thumbstick_action = XR_NULL_HANDLE;
+    gOpenXR.trigger_action = XR_NULL_HANDLE;
+    gOpenXR.primary_action = XR_NULL_HANDLE;
+    gOpenXR.secondary_action = XR_NULL_HANDLE;
+    gOpenXR.thumbstick_click_action = XR_NULL_HANDLE;
+    gOpenXR.menu_action = XR_NULL_HANDLE;
+    gOpenXR.action_set = XR_NULL_HANDLE;
+    gOpenXR.actions_created = 0;
+    gOpenXR.actions_attached = 0;
+}
+
 static void OpenXRReleaseResources(void) {
     OpenXRReleaseGraphics();
+    OpenXRReleaseActions();
     if (gOpenXR.instance != XR_NULL_HANDLE)
         xrDestroyInstance(gOpenXR.instance);
     OpenXRReset();
@@ -331,6 +446,446 @@ static int OpenXRRuntimeReady(void) {
         return 0;
 
     return WaitNamedPipeA("\\\\.\\pipe\\SteamVR_Namespace", 0) != FALSE;
+}
+
+static int OpenXRCreateActions(void) {
+    static const char* hand_names[2] = { "/user/hand/left", "/user/hand/right" };
+    static const char* profiles[] = {
+        "/interaction_profiles/oculus/touch_controller",
+        "/interaction_profiles/valve/index_controller",
+        "/interaction_profiles/microsoft/motion_controller",
+    };
+    XrActionSetCreateInfo set_info;
+    XrActionCreateInfo action_info;
+    uint32_t i;
+
+    if (gOpenXR.instance == XR_NULL_HANDLE)
+        return 0;
+
+    for (i = 0; i < 2; i++) {
+        if (!OpenXRResultOK(xrStringToPath(gOpenXR.instance, hand_names[i], &gOpenXR.hand_paths[i]),
+                "xrStringToPath(hand)"))
+            return 0;
+    }
+
+    memset(&set_info, 0, sizeof(set_info));
+    set_info.type = XR_TYPE_ACTION_SET_CREATE_INFO;
+    strcpy(set_info.actionSetName, "dukevr");
+    strcpy(set_info.localizedActionSetName, "DukeVR Controls");
+    set_info.priority = 0;
+    if (!OpenXRResultOK(xrCreateActionSet(gOpenXR.instance, &set_info, &gOpenXR.action_set),
+            "xrCreateActionSet"))
+        return 0;
+
+    memset(&action_info, 0, sizeof(action_info));
+    action_info.type = XR_TYPE_ACTION_CREATE_INFO;
+    strcpy(action_info.actionName, "grab_hud");
+    strcpy(action_info.localizedActionName, "Grab HUD");
+    action_info.actionType = XR_ACTION_TYPE_FLOAT_INPUT;
+    action_info.countSubactionPaths = 2;
+    action_info.subactionPaths = gOpenXR.hand_paths;
+    if (!OpenXRResultOK(xrCreateAction(gOpenXR.action_set, &action_info, &gOpenXR.grip_action),
+            "xrCreateAction(grip)")) {
+        OpenXRReleaseActions();
+        return 0;
+    }
+
+    memset(&action_info, 0, sizeof(action_info));
+    action_info.type = XR_TYPE_ACTION_CREATE_INFO;
+    strcpy(action_info.actionName, "hud_pose");
+    strcpy(action_info.localizedActionName, "HUD Controller Pose");
+    action_info.actionType = XR_ACTION_TYPE_POSE_INPUT;
+    action_info.countSubactionPaths = 2;
+    action_info.subactionPaths = gOpenXR.hand_paths;
+    if (!OpenXRResultOK(xrCreateAction(gOpenXR.action_set, &action_info, &gOpenXR.pose_action),
+            "xrCreateAction(pose)")) {
+        OpenXRReleaseActions();
+        return 0;
+    }
+
+    struct ActionDescription {
+        const char* name;
+        const char* localized_name;
+        XrActionType type;
+        XrAction* action;
+        const char* error_name;
+    } const action_descriptions[] = {
+        { "thumbstick", "Thumbstick", XR_ACTION_TYPE_VECTOR2F_INPUT,
+          &gOpenXR.thumbstick_action, "xrCreateAction(thumbstick)" },
+        { "trigger", "Trigger", XR_ACTION_TYPE_FLOAT_INPUT,
+          &gOpenXR.trigger_action, "xrCreateAction(trigger)" },
+        { "primary", "Primary Button", XR_ACTION_TYPE_BOOLEAN_INPUT,
+          &gOpenXR.primary_action, "xrCreateAction(primary)" },
+        { "secondary", "Secondary Button", XR_ACTION_TYPE_BOOLEAN_INPUT,
+          &gOpenXR.secondary_action, "xrCreateAction(secondary)" },
+        { "thumbstick_click", "Thumbstick Click", XR_ACTION_TYPE_BOOLEAN_INPUT,
+          &gOpenXR.thumbstick_click_action, "xrCreateAction(thumbstick click)" },
+        { "menu", "Menu Button", XR_ACTION_TYPE_BOOLEAN_INPUT,
+          &gOpenXR.menu_action, "xrCreateAction(menu)" },
+    };
+    for (auto const& description : action_descriptions) {
+        memset(&action_info, 0, sizeof(action_info));
+        action_info.type = XR_TYPE_ACTION_CREATE_INFO;
+        strcpy(action_info.actionName, description.name);
+        strcpy(action_info.localizedActionName, description.localized_name);
+        action_info.actionType = description.type;
+        action_info.countSubactionPaths = 2;
+        action_info.subactionPaths = gOpenXR.hand_paths;
+        if (!OpenXRResultOK(xrCreateAction(gOpenXR.action_set, &action_info, description.action),
+                description.error_name)) {
+            OpenXRReleaseActions();
+            return 0;
+        }
+    }
+
+    for (i = 0; i < ARRAY_SIZE(profiles); i++) {
+        const char* grip_paths[2] = {
+            "/user/hand/left/input/squeeze/value",
+            "/user/hand/right/input/squeeze/value",
+        };
+        const char* pose_paths[2] = {
+            "/user/hand/left/input/grip/pose",
+            "/user/hand/right/input/grip/pose",
+        };
+        XrPath profile_path;
+        const char* thumbstick_paths[2] = {
+            "/user/hand/left/input/thumbstick",
+            "/user/hand/right/input/thumbstick",
+        };
+        const char* trigger_paths[2] = {
+            "/user/hand/left/input/trigger/value",
+            "/user/hand/right/input/trigger/value",
+        };
+        const char* primary_paths[2] = {
+            i == 1 ? "/user/hand/left/input/a/click" : "/user/hand/left/input/x/click",
+            "/user/hand/right/input/a/click",
+        };
+        const char* secondary_paths[2] = {
+            i == 1 ? "/user/hand/left/input/b/click" : "/user/hand/left/input/y/click",
+            "/user/hand/right/input/b/click",
+        };
+        const char* thumbstick_click_paths[2] = {
+            "/user/hand/left/input/thumbstick/click",
+            "/user/hand/right/input/thumbstick/click",
+        };
+        const char* menu_paths[2] = {
+            i == 1 ? "/user/hand/left/input/application_menu/click" : "/user/hand/left/input/menu/click",
+            i == 1 ? "/user/hand/right/input/application_menu/click" : "/user/hand/right/input/menu/click",
+        };
+        XrPath paths[24];
+        XrActionSuggestedBinding bindings[32];
+        XrInteractionProfileSuggestedBinding suggested;
+        uint32_t binding_count = 0;
+
+        if (!OpenXRResultOK(xrStringToPath(gOpenXR.instance, profiles[i], &profile_path),
+                "xrStringToPath(profile)"))
+            continue;
+#define DUKEVR_ADD_BINDING(action_handle, path_string) do { \
+            if (!OpenXRResultOK(xrStringToPath(gOpenXR.instance, path_string, &paths[binding_count]), \
+                    "xrStringToPath(controller binding)")) \
+                continue; \
+            bindings[binding_count].action = action_handle; \
+            bindings[binding_count].binding = paths[binding_count]; \
+            binding_count++; \
+        } while (0)
+        const int motion_controller = i == 2;
+        for (uint32_t hand = 0; hand < 2; hand++) {
+            DUKEVR_ADD_BINDING(gOpenXR.grip_action, grip_paths[hand]);
+            DUKEVR_ADD_BINDING(gOpenXR.pose_action, pose_paths[hand]);
+            DUKEVR_ADD_BINDING(gOpenXR.thumbstick_action, motion_controller
+                ? (hand == 0 ? "/user/hand/left/input/trackpad" : "/user/hand/right/input/trackpad")
+                : thumbstick_paths[hand]);
+            DUKEVR_ADD_BINDING(gOpenXR.trigger_action, trigger_paths[hand]);
+            if (motion_controller)
+                DUKEVR_ADD_BINDING(gOpenXR.primary_action, hand == 0
+                    ? "/user/hand/left/input/trackpad/click"
+                    : "/user/hand/right/input/trackpad/click");
+            else {
+                DUKEVR_ADD_BINDING(gOpenXR.primary_action, primary_paths[hand]);
+                DUKEVR_ADD_BINDING(gOpenXR.secondary_action, secondary_paths[hand]);
+            }
+            if (!motion_controller)
+                DUKEVR_ADD_BINDING(gOpenXR.thumbstick_click_action, thumbstick_click_paths[hand]);
+            /* The left controller owns the menu action on Touch/Index-style
+             * controllers. The right-side suggestion is useful for devices
+             * that expose an application/menu button on both hands. */
+            if (hand == 0 || i == 2)
+                DUKEVR_ADD_BINDING(gOpenXR.menu_action, menu_paths[hand]);
+        }
+#undef DUKEVR_ADD_BINDING
+
+        memset(&suggested, 0, sizeof(suggested));
+        suggested.type = XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING;
+        suggested.interactionProfile = profile_path;
+        suggested.countSuggestedBindings = binding_count;
+        suggested.suggestedBindings = bindings;
+        if (!OpenXRResultOK(xrSuggestInteractionProfileBindings(gOpenXR.instance, &suggested),
+                "xrSuggestInteractionProfileBindings"))
+            initprintf("OpenXR: controller profile suggestion rejected: %s", profiles[i]);
+    }
+
+    gOpenXR.actions_created = 1;
+    initprintf("OpenXR: controller actions created (movement, snap turn, weapons, gameplay, menus)");
+    return 1;
+}
+
+static void OpenXRSyncControllerActions(void) {
+    XrActiveActionSet active_set;
+    XrActionsSyncInfo sync_info;
+    uint32_t hand;
+
+    uint64_t const now = GetTickCount64();
+    int old_direction = gOpenXR.menu_direction;
+    int new_direction = 0;
+
+    memset(gOpenXR.controller_valid, 0, sizeof(gOpenXR.controller_valid));
+    memset(gOpenXR.controller_grip, 0, sizeof(gOpenXR.controller_grip));
+    memset(gOpenXR.controller_thumbstick, 0, sizeof(gOpenXR.controller_thumbstick));
+    memset(gOpenXR.controller_trigger, 0, sizeof(gOpenXR.controller_trigger));
+    memset(gOpenXR.controller_primary, 0, sizeof(gOpenXR.controller_primary));
+    memset(gOpenXR.controller_secondary, 0, sizeof(gOpenXR.controller_secondary));
+    memset(gOpenXR.controller_thumbstick_click, 0, sizeof(gOpenXR.controller_thumbstick_click));
+    memset(gOpenXR.controller_menu, 0, sizeof(gOpenXR.controller_menu));
+    if (!gOpenXR.actions_created || !gOpenXR.actions_attached ||
+        gOpenXR.session == XR_NULL_HANDLE || gOpenXR.view_space == XR_NULL_HANDLE)
+        return;
+
+    memset(&active_set, 0, sizeof(active_set));
+    active_set.actionSet = gOpenXR.action_set;
+    active_set.subactionPath = XR_NULL_PATH;
+    memset(&sync_info, 0, sizeof(sync_info));
+    sync_info.type = XR_TYPE_ACTIONS_SYNC_INFO;
+    sync_info.countActiveActionSets = 1;
+    sync_info.activeActionSets = &active_set;
+    if (!OpenXRResultOK(xrSyncActions(gOpenXR.session, &sync_info), "xrSyncActions"))
+        return;
+
+    for (hand = 0; hand < 2; hand++) {
+        XrActionStateGetInfo get_info;
+        XrActionStateFloat grip_state;
+        XrActionStateFloat trigger_state;
+        XrActionStateVector2f thumbstick_state;
+        XrActionStateBoolean primary_state;
+        XrActionStateBoolean secondary_state;
+        XrActionStateBoolean thumbstick_click_state;
+        XrActionStateBoolean menu_state;
+        XrSpaceLocation location;
+        memset(&get_info, 0, sizeof(get_info));
+        get_info.type = XR_TYPE_ACTION_STATE_GET_INFO;
+        get_info.action = gOpenXR.grip_action;
+        get_info.subactionPath = gOpenXR.hand_paths[hand];
+        memset(&grip_state, 0, sizeof(grip_state));
+        grip_state.type = XR_TYPE_ACTION_STATE_FLOAT;
+        if (!OpenXRResultOK(xrGetActionStateFloat(gOpenXR.session, &get_info, &grip_state),
+                "xrGetActionStateFloat"))
+            continue;
+
+#define DUKEVR_GET_ACTION_STATE(action_handle, state, state_type, getter, label) do { \
+            memset(&(state), 0, sizeof(state)); \
+            (state).type = state_type; \
+            get_info.action = action_handle; \
+            if (!OpenXRResultOK(getter(gOpenXR.session, &get_info, &(state)), label)) \
+                continue; \
+        } while (0)
+        DUKEVR_GET_ACTION_STATE(gOpenXR.trigger_action, trigger_state,
+            XR_TYPE_ACTION_STATE_FLOAT, xrGetActionStateFloat, "xrGetActionStateFloat(trigger)");
+        DUKEVR_GET_ACTION_STATE(gOpenXR.thumbstick_action, thumbstick_state,
+            XR_TYPE_ACTION_STATE_VECTOR2F, xrGetActionStateVector2f, "xrGetActionStateVector2f");
+        DUKEVR_GET_ACTION_STATE(gOpenXR.primary_action, primary_state,
+            XR_TYPE_ACTION_STATE_BOOLEAN, xrGetActionStateBoolean, "xrGetActionStateBoolean(primary)");
+        DUKEVR_GET_ACTION_STATE(gOpenXR.secondary_action, secondary_state,
+            XR_TYPE_ACTION_STATE_BOOLEAN, xrGetActionStateBoolean, "xrGetActionStateBoolean(secondary)");
+        DUKEVR_GET_ACTION_STATE(gOpenXR.thumbstick_click_action, thumbstick_click_state,
+            XR_TYPE_ACTION_STATE_BOOLEAN, xrGetActionStateBoolean, "xrGetActionStateBoolean(stick click)");
+        DUKEVR_GET_ACTION_STATE(gOpenXR.menu_action, menu_state,
+            XR_TYPE_ACTION_STATE_BOOLEAN, xrGetActionStateBoolean, "xrGetActionStateBoolean(menu)");
+#undef DUKEVR_GET_ACTION_STATE
+
+        gOpenXR.controller_thumbstick[hand][0] = thumbstick_state.isActive ? thumbstick_state.currentState.x : 0.f;
+        gOpenXR.controller_thumbstick[hand][1] = thumbstick_state.isActive ? thumbstick_state.currentState.y : 0.f;
+        gOpenXR.controller_trigger[hand] = trigger_state.isActive ? trigger_state.currentState : 0.f;
+        gOpenXR.controller_grip[hand] = grip_state.isActive && grip_state.currentState > 0.55f;
+        gOpenXR.controller_primary[hand] = primary_state.isActive && primary_state.currentState;
+        gOpenXR.controller_secondary[hand] = secondary_state.isActive && secondary_state.currentState;
+        gOpenXR.controller_thumbstick_click[hand] = thumbstick_click_state.isActive && thumbstick_click_state.currentState;
+        gOpenXR.controller_menu[hand] = menu_state.isActive && menu_state.currentState;
+        if (hand == 0 && !gOpenXR.controller_grip[hand] &&
+            gOpenXR.controller_primary[hand] && !gOpenXR.previous_primary[hand])
+            gOpenXR.weapon_change_pending = -1;
+        if (hand == 0 && !gOpenXR.controller_grip[hand] &&
+            gOpenXR.controller_secondary[hand] && !gOpenXR.previous_secondary[hand])
+            gOpenXR.weapon_change_pending = 1;
+        if (hand == 1 && gOpenXR.controller_primary[hand] && !gOpenXR.previous_primary[hand])
+            gOpenXR.menu_advance_pending = 1;
+        if (hand == 1 && gOpenXR.controller_secondary[hand] && !gOpenXR.previous_secondary[hand])
+            gOpenXR.menu_back_pending = 1;
+        if (hand == 1 && trigger_state.isActive && trigger_state.currentState > 0.55f &&
+            !gOpenXR.previous_trigger[hand])
+            gOpenXR.menu_advance_pending = 1;
+        if (gOpenXR.controller_menu[hand] && !gOpenXR.previous_menu[hand])
+            gOpenXR.menu_escape_pending = 1;
+        gOpenXR.previous_primary[hand] = gOpenXR.controller_primary[hand];
+        gOpenXR.previous_secondary[hand] = gOpenXR.controller_secondary[hand];
+        gOpenXR.previous_trigger[hand] = trigger_state.isActive && trigger_state.currentState > 0.55f;
+        gOpenXR.previous_thumbstick_click[hand] = gOpenXR.controller_thumbstick_click[hand];
+        gOpenXR.previous_menu[hand] = gOpenXR.controller_menu[hand];
+
+        memset(&location, 0, sizeof(location));
+        location.type = XR_TYPE_SPACE_LOCATION;
+        if (!OpenXRResultOK(xrLocateSpace(gOpenXR.hand_spaces[hand], gOpenXR.view_space,
+                gOpenXR.predicted_display_time, &location), "xrLocateSpace(controller)"))
+            continue;
+        if ((location.locationFlags & (XR_SPACE_LOCATION_POSITION_VALID_BIT |
+                XR_SPACE_LOCATION_ORIENTATION_VALID_BIT)) !=
+            (XR_SPACE_LOCATION_POSITION_VALID_BIT | XR_SPACE_LOCATION_ORIENTATION_VALID_BIT))
+            continue;
+
+        gOpenXR.controller_valid[hand] = 1;
+        gOpenXR.controller_position[hand][0] = location.pose.position.x;
+        gOpenXR.controller_position[hand][1] = location.pose.position.y;
+        gOpenXR.controller_position[hand][2] = location.pose.position.z;
+        gOpenXR.controller_orientation[hand][0] = location.pose.orientation.x;
+        gOpenXR.controller_orientation[hand][1] = location.pose.orientation.y;
+        gOpenXR.controller_orientation[hand][2] = location.pose.orientation.z;
+        gOpenXR.controller_orientation[hand][3] = location.pose.orientation.w;
+    }
+
+    float const menu_x = gOpenXR.controller_thumbstick[0][0];
+    float const menu_y = gOpenXR.controller_thumbstick[0][1];
+    if (fabsf(menu_y) > fabsf(menu_x) && fabsf(menu_y) >= .35f)
+        new_direction = menu_y > 0.f ? 1 : 2;
+    else if (fabsf(menu_x) >= .35f)
+        new_direction = menu_x < 0.f ? 3 : 4;
+    gOpenXR.menu_direction = new_direction;
+    if (new_direction != old_direction) {
+        if (new_direction != 0) {
+            gOpenXR.menu_direction_pending = 1;
+            gOpenXR.menu_direction_next_repeat = now + 500;
+        } else {
+            gOpenXR.menu_direction_pending = 0;
+            gOpenXR.menu_direction_next_repeat = 0;
+        }
+    } else if (new_direction != 0 && now >= gOpenXR.menu_direction_next_repeat) {
+        gOpenXR.menu_direction_pending = 1;
+        gOpenXR.menu_direction_next_repeat = now + 60;
+    }
+
+    float const turn_x = gOpenXR.controller_thumbstick[1][0];
+    if (fabsf(turn_x) >= .65f) {
+        if (!gOpenXR.snap_turn_latched) {
+            gOpenXR.snap_turn_pending = turn_x < 0.f ? -1 : 1;
+            gOpenXR.snap_turn_latched = 1;
+        }
+    } else
+        gOpenXR.snap_turn_latched = 0;
+
+    float const weapon_y = gOpenXR.controller_thumbstick[1][1];
+    if (fabsf(weapon_y) >= .65f) {
+        if (!gOpenXR.weapon_stick_latched) {
+            gOpenXR.weapon_change_pending = weapon_y > 0.f ? 1 : -1;
+            gOpenXR.weapon_stick_latched = 1;
+        }
+    } else
+        gOpenXR.weapon_stick_latched = 0;
+}
+
+int DukeVROpenXR_GetControllerInput(DukeVROpenXRControllerInput* input) {
+    if (input == NULL || !gOpenXR.initialized)
+        return 0;
+    for (int hand = 0; hand < 2; ++hand) {
+        input->thumbstick[hand][0] = gOpenXR.controller_thumbstick[hand][0];
+        input->thumbstick[hand][1] = gOpenXR.controller_thumbstick[hand][1];
+        input->trigger[hand] = gOpenXR.controller_trigger[hand];
+        input->grip[hand] = gOpenXR.controller_grip[hand];
+        input->primary[hand] = gOpenXR.controller_primary[hand];
+        input->secondary[hand] = gOpenXR.controller_secondary[hand];
+        input->thumbstick_click[hand] = gOpenXR.controller_thumbstick_click[hand];
+        input->menu[hand] = gOpenXR.controller_menu[hand];
+    }
+    return 1;
+}
+
+int DukeVROpenXR_GetMenuInput(int* direction, int* advance, int* back, int* escape) {
+    if (direction != NULL)
+        *direction = gOpenXR.menu_direction_pending ? gOpenXR.menu_direction : 0;
+    if (advance != NULL)
+        *advance = gOpenXR.menu_advance_pending;
+    if (back != NULL)
+        *back = gOpenXR.menu_back_pending;
+    if (escape != NULL)
+        *escape = gOpenXR.menu_escape_pending;
+    return gOpenXR.initialized;
+}
+
+void DukeVROpenXR_ClearMenuDirection(void) { gOpenXR.menu_direction_pending = 0; }
+void DukeVROpenXR_ClearMenuAdvance(void) { gOpenXR.menu_advance_pending = 0; }
+void DukeVROpenXR_ClearMenuBack(void) { gOpenXR.menu_back_pending = 0; }
+void DukeVROpenXR_ClearMenuEscape(void) { gOpenXR.menu_escape_pending = 0; }
+void DukeVROpenXR_ClearMenuInput(void) {
+    gOpenXR.menu_direction_pending = 0;
+    gOpenXR.menu_advance_pending = 0;
+    gOpenXR.menu_back_pending = 0;
+    gOpenXR.menu_escape_pending = 0;
+}
+int DukeVROpenXR_MenuStickActive(void) { return gOpenXR.menu_direction != 0; }
+
+int DukeVROpenXR_ConsumeSnapTurn(void) {
+    int const turn = gOpenXR.snap_turn_pending;
+    gOpenXR.snap_turn_pending = 0;
+    return turn;
+}
+
+int DukeVROpenXR_ConsumeWeaponChange(void) {
+    int const change = gOpenXR.weapon_change_pending;
+    gOpenXR.weapon_change_pending = 0;
+    return change;
+}
+
+void DukeVROpenXR_ApplyGameplayInput(void* control_info) {
+    ControlInfo* const info = (ControlInfo*)control_info;
+    DukeVROpenXRControllerInput input;
+    if (info == NULL || !DukeVROpenXR_GetControllerInput(&input))
+        return;
+
+    /* These edges are menu-only actions. A gameplay input tick may see them
+     * while the menu is being opened, so consume them before they can leak
+     * into the next menu frame. */
+    DukeVROpenXR_ClearMenuAdvance();
+    DukeVROpenXR_ClearMenuBack();
+
+    /* OpenXR uses a normalized [-1,1] vector. ControlInfo uses the same
+     * 32767 full-scale convention as the existing joystick path. The signs
+     * deliberately match EDuke32's modern gamepad mapping. */
+    info->dx += (int32_t)lrintf(input.thumbstick[0][0] * 32767.f);
+    info->dz -= (int32_t)lrintf(input.thumbstick[0][1] * 32767.f);
+
+#define DUKEVR_SET_BUTTON(function) (CONTROL_ButtonState |= (1ULL << (function)))
+    if (input.thumbstick_click[0])
+        DUKEVR_SET_BUTTON(gamefunc_Inventory);
+    if (input.grip[0])
+        DUKEVR_SET_BUTTON(gamefunc_Run);
+    if (input.trigger[0] > .55f)
+        DUKEVR_SET_BUTTON(gamefunc_Open);
+    if (input.grip[0]) {
+        if (input.primary[0])
+            DUKEVR_SET_BUTTON(gamefunc_Inventory_Left);
+        if (input.secondary[0])
+            DUKEVR_SET_BUTTON(gamefunc_Inventory_Right);
+    }
+    if (input.trigger[1] > .55f)
+        DUKEVR_SET_BUTTON(gamefunc_Fire);
+    if (input.primary[1])
+        DUKEVR_SET_BUTTON(gamefunc_Jump);
+    if (input.secondary[1])
+        DUKEVR_SET_BUTTON(gamefunc_Crouch);
+    if (input.grip[1])
+        DUKEVR_SET_BUTTON(gamefunc_Quick_Kick);
+    int const weapon_change = DukeVROpenXR_ConsumeWeaponChange();
+    if (weapon_change > 0)
+        DUKEVR_SET_BUTTON(gamefunc_Next_Weapon);
+    else if (weapon_change < 0)
+        DUKEVR_SET_BUTTON(gamefunc_Previous_Weapon);
+#undef DUKEVR_SET_BUTTON
 }
 
 static void OpenXRPollEvents(void) {
@@ -525,6 +1080,83 @@ static int OpenXRCreateHudSwapchain(void) {
     return OpenXRResultOK(result, "xrEnumerateSwapchainImages(HUD)");
 }
 
+static int OpenXRCreateMovableSwapchain(int layer) {
+    XrSwapchainCreateInfo create_info;
+    uint32_t format_count = 0;
+    int64_t* formats;
+    uint32_t i;
+    int64_t chosen_format = 0;
+    XrResult result;
+    XrResult swapchain_result = XR_ERROR_SWAPCHAIN_FORMAT_UNSUPPORTED;
+    uint32_t image_count = 0;
+
+    if (layer < 0 || layer >= DUKEVR_OPENXR_MOVABLE_LAYERS)
+        return 0;
+    result = xrEnumerateSwapchainFormats(gOpenXR.session, 0, &format_count, NULL);
+    if (!OpenXRResultOK(result, "xrEnumerateSwapchainFormats(movable count)"))
+        return 0;
+    formats = (int64_t*)calloc(format_count, sizeof(*formats));
+    if (formats == NULL)
+        return 0;
+    result = xrEnumerateSwapchainFormats(gOpenXR.session, format_count, &format_count, formats);
+    if (!OpenXRResultOK(result, "xrEnumerateSwapchainFormats(movable)")) {
+        free(formats);
+        return 0;
+    }
+    for (i = 0; i < format_count; ++i) {
+        if (formats[i] == GL_SRGB8_ALPHA8) {
+            chosen_format = formats[i];
+            break;
+        }
+    }
+    if (chosen_format == 0 && format_count > 0)
+        chosen_format = formats[0];
+
+    memset(&create_info, 0, sizeof(create_info));
+    create_info.type = XR_TYPE_SWAPCHAIN_CREATE_INFO;
+    create_info.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT |
+        XR_SWAPCHAIN_USAGE_SAMPLED_BIT;
+    create_info.sampleCount = 1;
+    create_info.width = gOpenXR.config_views[0].recommendedImageRectWidth;
+    create_info.height = gOpenXR.config_views[0].recommendedImageRectHeight;
+    create_info.faceCount = 1;
+    create_info.arraySize = 1;
+    create_info.mipCount = 1;
+    for (i = 0; i < format_count; ++i) {
+        uint32_t index = (chosen_format == GL_SRGB8_ALPHA8) ? 0 : i;
+        if (chosen_format == GL_SRGB8_ALPHA8) {
+            for (index = 0; index < format_count && formats[index] != GL_SRGB8_ALPHA8; ++index) {}
+            if (index >= format_count)
+                continue;
+        }
+        create_info.format = formats[index];
+        result = xrCreateSwapchain(gOpenXR.session, &create_info,
+            &gOpenXR.movable_swapchains[layer]);
+        if (XR_SUCCEEDED(result)) {
+            swapchain_result = result;
+            break;
+        }
+        if (chosen_format == GL_SRGB8_ALPHA8)
+            chosen_format = 0;
+    }
+    free(formats);
+    if (!OpenXRResultOK(swapchain_result, "xrCreateSwapchain(movable)"))
+        return 0;
+
+    result = xrEnumerateSwapchainImages(gOpenXR.movable_swapchains[layer], 0,
+        &image_count, NULL);
+    if (!OpenXRResultOK(result, "xrEnumerateSwapchainImages(movable count)"))
+        return 0;
+    if (image_count > DUKEVR_OPENXR_MAX_IMAGES)
+        image_count = DUKEVR_OPENXR_MAX_IMAGES;
+    gOpenXR.movable_image_counts[layer] = image_count;
+    for (i = 0; i < image_count; ++i)
+        gOpenXR.movable_images[layer][i].type = XR_TYPE_SWAPCHAIN_IMAGE_OPENGL_KHR;
+    result = xrEnumerateSwapchainImages(gOpenXR.movable_swapchains[layer], image_count,
+        &image_count, (XrSwapchainImageBaseHeader*)gOpenXR.movable_images[layer]);
+    return OpenXRResultOK(result, "xrEnumerateSwapchainImages(movable)");
+}
+
 static int DukeVROpenXR_InitializeGraphics(void) {
     XrGraphicsBindingOpenGLWin32KHR binding;
     XrSessionCreateInfo session_info;
@@ -553,6 +1185,33 @@ static int DukeVROpenXR_InitializeGraphics(void) {
         return 0;
     initprintf("OpenXR: xrCreateSession succeeded");
 
+    if (gOpenXR.actions_created) {
+        XrSessionActionSetsAttachInfo attach_info;
+        XrActionSpaceCreateInfo action_space_info;
+        uint32_t hand;
+
+        memset(&attach_info, 0, sizeof(attach_info));
+        attach_info.type = XR_TYPE_SESSION_ACTION_SETS_ATTACH_INFO;
+        attach_info.countActionSets = 1;
+        attach_info.actionSets = &gOpenXR.action_set;
+        if (OpenXRResultOK(xrAttachSessionActionSets(gOpenXR.session, &attach_info),
+                "xrAttachSessionActionSets")) {
+            gOpenXR.actions_attached = 1;
+            for (hand = 0; hand < 2; hand++) {
+                memset(&action_space_info, 0, sizeof(action_space_info));
+                action_space_info.type = XR_TYPE_ACTION_SPACE_CREATE_INFO;
+                action_space_info.action = gOpenXR.pose_action;
+                action_space_info.subactionPath = gOpenXR.hand_paths[hand];
+                action_space_info.poseInActionSpace.orientation.w = 1.0f;
+                if (!OpenXRResultOK(xrCreateActionSpace(gOpenXR.session, &action_space_info,
+                        &gOpenXR.hand_spaces[hand]), "xrCreateActionSpace(controller)")) {
+                    gOpenXR.actions_attached = 0;
+                    break;
+                }
+            }
+        }
+    }
+
     memset(&space_info, 0, sizeof(space_info));
     space_info.type = XR_TYPE_REFERENCE_SPACE_CREATE_INFO;
     space_info.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_LOCAL;
@@ -569,7 +1228,8 @@ static int DukeVROpenXR_InitializeGraphics(void) {
         return 0;
     }
     if (!OpenXRCreateSwapchain(0) || !OpenXRCreateSwapchain(1) ||
-        !OpenXRCreateHudSwapchain()) {
+        !OpenXRCreateHudSwapchain() || !OpenXRCreateMovableSwapchain(0) ||
+        !OpenXRCreateMovableSwapchain(1)) {
         OpenXRReleaseGraphics();
         return 0;
     }
@@ -615,6 +1275,14 @@ static void OpenXRAbortFrame(void) {
     gOpenXR.hud_swapchain_acquired = 0;
     gOpenXR.hud_image_acquired = 0;
     gOpenXR.hud_content_submitted = 0;
+    for (i = 0; i < DUKEVR_OPENXR_MOVABLE_LAYERS; ++i) {
+        if (gOpenXR.movable_swapchains_acquired[i] &&
+            gOpenXR.movable_swapchains[i] != XR_NULL_HANDLE)
+            xrReleaseSwapchainImage(gOpenXR.movable_swapchains[i], &release_info);
+        gOpenXR.movable_swapchains_acquired[i] = 0;
+        gOpenXR.movable_images_acquired[i] = 0;
+        gOpenXR.movable_content_submitted[i] = 0;
+    }
     if (gOpenXR.frame_begun && gOpenXR.session != XR_NULL_HANDLE) {
         memset(&end_info, 0, sizeof(end_info));
         end_info.type = XR_TYPE_FRAME_END_INFO;
@@ -675,7 +1343,7 @@ int DukeVROpenXR_Initialize(void) {
         XrInstanceProperties instance_properties;
         memset(&instance_properties, 0, sizeof(instance_properties));
         instance_properties.type = XR_TYPE_INSTANCE_PROPERTIES;
-        if (XR_SUCCEEDED(xrGetInstanceProperties(gOpenXR.instance, &instance_properties))) {
+    if (XR_SUCCEEDED(xrGetInstanceProperties(gOpenXR.instance, &instance_properties))) {
             gOpenXR.vdxr_runtime = strstr(instance_properties.runtimeName, "VirtualDesktopXR") != NULL;
             initprintf("OpenXR runtime: %s (version %u.%u.%u)",
                 instance_properties.runtimeName,
@@ -684,6 +1352,11 @@ int DukeVROpenXR_Initialize(void) {
                 XR_VERSION_PATCH(instance_properties.runtimeVersion));
         }
     }
+
+    /* Controller actions are optional. A runtime that exposes the graphics
+     * path but has no motion-controller profile must still run normally. */
+    if (!OpenXRCreateActions())
+        initprintf("OpenXR: HUD controller actions unavailable; continuing without drag input");
 
     memset(&system_info, 0, sizeof(system_info));
     system_info.type = XR_TYPE_SYSTEM_GET_INFO;
@@ -828,6 +1501,7 @@ int DukeVROpenXR_BeginFrame(void) {
             gOpenXR.have_eye_geometry = 1;
         }
     }
+    OpenXRSyncControllerActions();
     if (getenv("OPENXR_TRACE") != NULL && traced == 2) {
         for (i = 0; i < 2; i++) {
             initprintf("[XRTRACE] eye %u: fov L/R/U/D=%0.6f %0.6f %0.6f %0.6f pose p=%0.6f %0.6f %0.6f q=%0.6f %0.6f %0.6f %0.6f\n",
@@ -888,6 +1562,26 @@ int DukeVROpenXR_BeginFrame(void) {
             }
         }
     }
+    for (i = 0; i < DUKEVR_OPENXR_MOVABLE_LAYERS; ++i) {
+        result = xrAcquireSwapchainImage(gOpenXR.movable_swapchains[i], &acquire_info,
+            &gOpenXR.movable_images_acquired[i]);
+        if (!OpenXRResultOK(result, "xrAcquireSwapchainImage(movable)")) {
+            OpenXRAbortFrame();
+            return 0;
+        }
+        gOpenXR.movable_swapchains_acquired[i] = 1;
+        if (!gOpenXR.vdxr_skip_wait) {
+            result = xrWaitSwapchainImage(gOpenXR.movable_swapchains[i], &wait_image_info);
+            if (!OpenXRResultOK(result, "xrWaitSwapchainImage(movable)")) {
+                if (gOpenXR.vdxr_runtime && result == XR_ERROR_CALL_ORDER_INVALID)
+                    gOpenXR.vdxr_skip_wait = 1;
+                else {
+                    OpenXRAbortFrame();
+                    return 0;
+                }
+            }
+        }
+    }
     gOpenXR.frame_active = 1;
 #ifdef POLYMER
     OpenXRApplyRendererFov();
@@ -898,6 +1592,10 @@ int DukeVROpenXR_BeginFrame(void) {
         logTrace++;
     }
     return 1;
+}
+
+int DukeVROpenXR_PrepareInput(void) {
+    return DukeVROpenXR_BeginFrame();
 }
 
 int DukeVROpenXR_FrameActive(void) {
@@ -928,6 +1626,26 @@ int DukeVROpenXR_GetEyePose(int eye, float orientation_xyzw[4], float position_x
     position_xyz[0] = gOpenXR.views[eye].pose.position.x;
     position_xyz[1] = gOpenXR.views[eye].pose.position.y;
     position_xyz[2] = gOpenXR.views[eye].pose.position.z;
+    return 1;
+}
+
+int DukeVROpenXR_GetControllerPose(int hand, float position_xyz[3],
+    float orientation_xyzw[4], int* grip_pressed) {
+    if (!gOpenXR.frame_active || hand < 0 || hand > 1 || !gOpenXR.controller_valid[hand])
+        return 0;
+    if (position_xyz != NULL) {
+        position_xyz[0] = gOpenXR.controller_position[hand][0];
+        position_xyz[1] = gOpenXR.controller_position[hand][1];
+        position_xyz[2] = gOpenXR.controller_position[hand][2];
+    }
+    if (orientation_xyzw != NULL) {
+        orientation_xyzw[0] = gOpenXR.controller_orientation[hand][0];
+        orientation_xyzw[1] = gOpenXR.controller_orientation[hand][1];
+        orientation_xyzw[2] = gOpenXR.controller_orientation[hand][2];
+        orientation_xyzw[3] = gOpenXR.controller_orientation[hand][3];
+    }
+    if (grip_pressed != NULL)
+        *grip_pressed = gOpenXR.controller_grip[hand];
     return 1;
 }
 
@@ -1099,13 +1817,59 @@ static int OpenXREnsureHudTarget(int width, int height) {
     return 1;
 }
 
+static int OpenXREnsureMovableTargets(int width, int height) {
+    int layer;
+    if (width <= 0 || height <= 0)
+        return 0;
+    if (gOpenXR.movable_fbos[0] != 0 &&
+        (gOpenXR.movable_target_width != width ||
+         gOpenXR.movable_target_height != height))
+        OpenXRReleaseMovableTargets();
+    if (gOpenXR.movable_fbos[0] != 0 && gOpenXR.movable_fbos[1] != 0)
+        return 1;
+
+    glGenFramebuffers(DUKEVR_OPENXR_MOVABLE_LAYERS, gOpenXR.movable_fbos);
+    glGenTextures(DUKEVR_OPENXR_MOVABLE_LAYERS, gOpenXR.movable_textures);
+    glGenRenderbuffers(DUKEVR_OPENXR_MOVABLE_LAYERS, gOpenXR.movable_depth);
+    glGenFramebuffers(DUKEVR_OPENXR_MOVABLE_LAYERS, gOpenXR.movable_runtime_fbos);
+    for (layer = 0; layer < DUKEVR_OPENXR_MOVABLE_LAYERS; ++layer) {
+        if (gOpenXR.movable_fbos[layer] == 0 || gOpenXR.movable_textures[layer] == 0 ||
+            gOpenXR.movable_depth[layer] == 0 || gOpenXR.movable_runtime_fbos[layer] == 0) {
+            OpenXRReleaseMovableTargets();
+            return 0;
+        }
+        glBindTexture(GL_TEXTURE_2D, gOpenXR.movable_textures[layer]);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0,
+            GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+        glBindRenderbuffer(GL_RENDERBUFFER, gOpenXR.movable_depth[layer]);
+        glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, width, height);
+        glBindFramebuffer(GL_FRAMEBUFFER, gOpenXR.movable_fbos[layer]);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
+            gOpenXR.movable_textures[layer], 0);
+        glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT,
+            GL_RENDERBUFFER, gOpenXR.movable_depth[layer]);
+        if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+            OpenXRReleaseMovableTargets();
+            glBindFramebuffer(GL_FRAMEBUFFER, 0);
+            return 0;
+        }
+    }
+    gOpenXR.movable_target_width = width;
+    gOpenXR.movable_target_height = height;
+    return 1;
+}
+
 /* Render Build into a moderately sized intermediate target with the same
  * aspect as the runtime eye, then scale it to the complete runtime eye image
  * in EndEyeRender. Build's logical buffers and the desktop mirror remain
  * independent of this target. */
 int DukeVROpenXR_BeginEyeRender(int eye) {
     GLuint texture;
-    int width, height;
+    int width = 0, height = 0;
     int scene_width, scene_height;
 
     if (!gOpenXR.frame_active || eye < 0 || eye > 1 || gOpenXR.eye_render_active)
@@ -1151,7 +1915,8 @@ int DukeVROpenXR_BeginHudRender(void) {
     int height = ydim;
 
     if (!gOpenXR.frame_active || !gOpenXR.eye_render_active ||
-        gOpenXR.hud_render_active || !OpenXREnsureHudTarget(width, height))
+        gOpenXR.hud_render_active || !OpenXREnsureHudTarget(width, height) ||
+        !OpenXREnsureMovableTargets(width, height))
         return 0;
     glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &gOpenXR.saved_hud_draw_framebuffer);
     glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &gOpenXR.saved_hud_read_framebuffer);
@@ -1160,18 +1925,57 @@ int DukeVROpenXR_BeginHudRender(void) {
     glViewport(0, 0, width, height);
     glClearColor(0.f, 0.f, 0.f, 0.f);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+    for (int layer = 0; layer < DUKEVR_OPENXR_MOVABLE_LAYERS; ++layer) {
+        glBindFramebuffer(GL_FRAMEBUFFER, gOpenXR.movable_fbos[layer]);
+        glViewport(0, 0, width, height);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+        gOpenXR.movable_content_submitted[layer] = 0;
+    }
+    glBindFramebuffer(GL_FRAMEBUFFER, gOpenXR.hud_fbo);
+    glViewport(0, 0, width, height);
     gOpenXR.hud_render_active = 1;
     return 1;
 }
 
+int DukeVROpenXR_BeginHudLayer(int layer) {
+    int index = layer - 1;
+    if (!gOpenXR.hud_render_active || gOpenXR.movable_render_active ||
+        index < 0 || index >= DUKEVR_OPENXR_MOVABLE_LAYERS)
+        return 0;
+    glBindFramebuffer(GL_FRAMEBUFFER, gOpenXR.movable_fbos[index]);
+    glViewport(0, 0, gOpenXR.movable_target_width, gOpenXR.movable_target_height);
+    gOpenXR.movable_render_active = layer;
+    return 1;
+}
+
+void DukeVROpenXR_EndHudLayer(void) {
+    int index = gOpenXR.movable_render_active - 1;
+    if (index < 0 || index >= DUKEVR_OPENXR_MOVABLE_LAYERS)
+        return;
+    gOpenXR.movable_content_submitted[index] = 1;
+    glBindFramebuffer(GL_FRAMEBUFFER, gOpenXR.hud_fbo);
+    glViewport(0, 0, gOpenXR.hud_target_width, gOpenXR.hud_target_height);
+    gOpenXR.movable_render_active = 0;
+}
+
+void DukeVROpenXR_SetHudLayerOffsets(int weapon_x, int weapon_y,
+    int status_x, int status_y) {
+    gOpenXR.movable_offsets[0][0] = weapon_x;
+    gOpenXR.movable_offsets[0][1] = weapon_y;
+    gOpenXR.movable_offsets[1][0] = status_x;
+    gOpenXR.movable_offsets[1][1] = status_y;
+}
+
 void DukeVROpenXR_EndHudRender(void) {
     GLuint texture;
-    int width, height;
+    int width = 0, height = 0;
     int copied = 0;
     static int logged;
 
     if (!gOpenXR.hud_render_active)
         return;
+    if (gOpenXR.movable_render_active)
+        DukeVROpenXR_EndHudLayer();
     texture = DukeVROpenXR_GetHudTexture();
     if (texture != 0 && DukeVROpenXR_GetEyeDimensions(0, &width, &height)) {
         glBindFramebuffer(GL_READ_FRAMEBUFFER, gOpenXR.hud_fbo);
@@ -1196,6 +2000,28 @@ void DukeVROpenXR_EndHudRender(void) {
             LOG_F(ERROR, "OpenXR HUD framebuffer incomplete while copying HUD texture");
             logged = 1;
         }
+    }
+    for (int layer = 0; layer < DUKEVR_OPENXR_MOVABLE_LAYERS; ++layer) {
+        if (width <= 0 || height <= 0 ||
+            !gOpenXR.movable_content_submitted[layer] ||
+            !gOpenXR.movable_swapchains_acquired[layer] ||
+            gOpenXR.movable_images_acquired[layer] >= gOpenXR.movable_image_counts[layer])
+            continue;
+        GLuint movableTexture = gOpenXR.movable_images[layer]
+            [gOpenXR.movable_images_acquired[layer]].image;
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, gOpenXR.movable_fbos[layer]);
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, gOpenXR.movable_runtime_fbos[layer]);
+        glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+            GL_TEXTURE_2D, movableTexture, 0);
+        if (glCheckFramebufferStatus(GL_DRAW_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE) {
+            glBlitFramebuffer(0, 0, gOpenXR.movable_target_width,
+                gOpenXR.movable_target_height, 0, 0, width, height,
+                GL_COLOR_BUFFER_BIT, GL_LINEAR);
+        } else {
+            gOpenXR.movable_content_submitted[layer] = 0;
+        }
+        glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+            GL_TEXTURE_2D, 0, 0);
     }
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, (GLuint)gOpenXR.saved_hud_draw_framebuffer);
     glBindFramebuffer(GL_READ_FRAMEBUFFER, (GLuint)gOpenXR.saved_hud_read_framebuffer);
@@ -1448,7 +2274,9 @@ void DukeVROpenXR_EndFrame(void) {
     XrFrameEndInfo end_info;
     XrCompositionLayerProjection projection_layer;
     XrCompositionLayerQuad hud_layer;
-    const XrCompositionLayerBaseHeader* layers[2];
+    XrCompositionLayerQuad movable_layers[DUKEVR_OPENXR_MOVABLE_LAYERS];
+    const XrCompositionLayerBaseHeader* layers[2 + DUKEVR_OPENXR_MOVABLE_LAYERS];
+    uint32_t layer_count = 0;
     uint32_t i;
 
     if (gOpenXR.eye_render_active)
@@ -1558,15 +2386,43 @@ void DukeVROpenXR_EndFrame(void) {
             hud_layer.size.height *= 0.5f;
         }
 #endif
-        if (gOpenXR.mono_quad_submitted)
-            layers[0] = (const XrCompositionLayerBaseHeader*)&hud_layer;
-        else {
-            layers[0] = (const XrCompositionLayerBaseHeader*)&projection_layer;
-            layers[1] = (const XrCompositionLayerBaseHeader*)&hud_layer;
+        if (gOpenXR.mono_quad_submitted) {
+            layers[layer_count++] = (const XrCompositionLayerBaseHeader*)&hud_layer;
+        } else {
+            layers[layer_count++] = (const XrCompositionLayerBaseHeader*)&projection_layer;
+            /* Match the original draw order: weapon, health/ammo HUD, then
+             * the general HUD (crosshair, quotes and menus) on top. */
+            for (i = 0; i < DUKEVR_OPENXR_MOVABLE_LAYERS; ++i) {
+                if (!gOpenXR.movable_content_submitted[i] ||
+                    !gOpenXR.movable_swapchains_acquired[i])
+                    continue;
+                movable_layers[i] = hud_layer;
+                movable_layers[i].subImage.swapchain = gOpenXR.movable_swapchains[i];
+                movable_layers[i].pose.position.x =
+                    ((float)gOpenXR.movable_offsets[i][0] / 320.0f) * hud_layer.size.width;
+                movable_layers[i].pose.position.y =
+                    -((float)gOpenXR.movable_offsets[i][1] / 200.0f) * hud_layer.size.height;
+                layers[layer_count++] =
+                    (const XrCompositionLayerBaseHeader*)&movable_layers[i];
+            }
+            {
+                static int loggedMovableLayers;
+                if (!loggedMovableLayers &&
+                    (gOpenXR.movable_content_submitted[0] ||
+                     gOpenXR.movable_content_submitted[1])) {
+                    LOG_F(INFO, "OpenXR independent HUD layers submitted: weapon=%d status=%d offsets=%d/%d,%d/%d",
+                        gOpenXR.movable_content_submitted[0],
+                        gOpenXR.movable_content_submitted[1],
+                        gOpenXR.movable_offsets[0][0], gOpenXR.movable_offsets[0][1],
+                        gOpenXR.movable_offsets[1][0], gOpenXR.movable_offsets[1][1]);
+                    loggedMovableLayers = 1;
+                }
+            }
+            layers[layer_count++] = (const XrCompositionLayerBaseHeader*)&hud_layer;
         }
     }
     else
-        layers[0] = (const XrCompositionLayerBaseHeader*)&projection_layer;
+        layers[layer_count++] = (const XrCompositionLayerBaseHeader*)&projection_layer;
     {
         static int traceCount;
         static int loggedMenuScale;
@@ -1584,7 +2440,7 @@ void DukeVROpenXR_EndFrame(void) {
     end_info.type = XR_TYPE_FRAME_END_INFO;
     end_info.displayTime = gOpenXR.predicted_display_time;
     end_info.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
-    end_info.layerCount = gOpenXR.mono_quad_submitted && hud_ready ? 1 : (hud_ready ? 2 : 1);
+    end_info.layerCount = layer_count;
     end_info.layers = layers;
 
     glFlush();
@@ -1605,6 +2461,13 @@ void DukeVROpenXR_EndFrame(void) {
             xrReleaseSwapchainImage(gOpenXR.hud_swapchain, &release_info);
         gOpenXR.hud_swapchain_acquired = 0;
         gOpenXR.hud_image_acquired = 0;
+        for (i = 0; i < DUKEVR_OPENXR_MOVABLE_LAYERS; ++i) {
+            if (gOpenXR.movable_swapchains_acquired[i])
+                xrReleaseSwapchainImage(gOpenXR.movable_swapchains[i], &release_info);
+            gOpenXR.movable_swapchains_acquired[i] = 0;
+            gOpenXR.movable_images_acquired[i] = 0;
+            gOpenXR.movable_content_submitted[i] = 0;
+        }
     }
     OpenXRResultOK(xrEndFrame(gOpenXR.session, &end_info), "xrEndFrame");
     gOpenXR.frame_active = 0;
@@ -1922,12 +2785,19 @@ ovrResult ovr_SetControllerVibration(ovrSession session, unsigned int controller
 
 int DukeVROpenXR_Enabled(void) { return 0; }
 int DukeVROpenXR_Initialize(void) { return 0; }
+int DukeVROpenXR_PrepareInput(void) { return 0; }
 int DukeVROpenXR_BeginFrame(void) { return 0; }
 int DukeVROpenXR_FrameActive(void) { return 0; }
 int DukeVROpenXR_BeginEyeRender(int eye) { (void)eye; return 0; }
 void DukeVROpenXR_EndEyeRender(void) {}
 int DukeVROpenXR_BeginHudRender(void) { return 0; }
 void DukeVROpenXR_EndHudRender(void) {}
+int DukeVROpenXR_BeginHudLayer(int layer) { (void)layer; return 0; }
+void DukeVROpenXR_EndHudLayer(void) {}
+void DukeVROpenXR_SetHudLayerOffsets(int weapon_x, int weapon_y,
+    int status_x, int status_y) {
+    (void)weapon_x; (void)weapon_y; (void)status_x; (void)status_y;
+}
 void DukeVROpenXR_SetHudMenuScale(int scaled) { (void)scaled; }
 int DukeVROpenXR_CurrentEye(void) { return -1; }
 int DukeVROpenXR_SceneFrameActive(void) { return 0; }
@@ -1943,6 +2813,31 @@ int DukeVROpenXR_GetEyePose(int eye, float orientation_xyzw[4], float position_x
     (void)position_xyz;
     return 0;
 }
+int DukeVROpenXR_GetControllerPose(int hand, float position_xyz[3],
+    float orientation_xyzw[4], int* grip_pressed) {
+    (void)hand; (void)position_xyz; (void)orientation_xyzw; (void)grip_pressed;
+    return 0;
+}
+int DukeVROpenXR_GetControllerInput(DukeVROpenXRControllerInput* input) {
+    (void)input;
+    return 0;
+}
+void DukeVROpenXR_ApplyGameplayInput(void* control_info) { (void)control_info; }
+int DukeVROpenXR_GetMenuInput(int* direction, int* advance, int* back, int* escape) {
+    if (direction != NULL) *direction = 0;
+    if (advance != NULL) *advance = 0;
+    if (back != NULL) *back = 0;
+    if (escape != NULL) *escape = 0;
+    return 0;
+}
+void DukeVROpenXR_ClearMenuDirection(void) {}
+void DukeVROpenXR_ClearMenuAdvance(void) {}
+void DukeVROpenXR_ClearMenuBack(void) {}
+void DukeVROpenXR_ClearMenuEscape(void) {}
+void DukeVROpenXR_ClearMenuInput(void) {}
+int DukeVROpenXR_MenuStickActive(void) { return 0; }
+int DukeVROpenXR_ConsumeSnapTurn(void) { return 0; }
+int DukeVROpenXR_ConsumeWeaponChange(void) { return 0; }
 int DukeVROpenXR_GetEyeFov(int eye, float* angle_left, float* angle_right,
     float* angle_up, float* angle_down) {
     (void)eye; (void)angle_left; (void)angle_right; (void)angle_up; (void)angle_down;

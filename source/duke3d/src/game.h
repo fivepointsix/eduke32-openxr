@@ -165,6 +165,9 @@ typedef struct {
     int32_t reccnt,crosshairscale;
 
     int32_t runkey_mode,kick_mode,statusbarscale,mouseaiming,weaponswitch,drawweapon;   // JBF 20031125
+    /* Flat OpenXR HUD offsets in the game's 320x200 coordinate space. */
+    int32_t vr_weapon_offset_x, vr_weapon_offset_y;
+    int32_t vr_statusbar_offset_x, vr_statusbar_offset_y;
     int32_t democams,color,msgdisptime,statusbarmode;
     int32_t m_noexits,noexits,autovote,automsg,idplayers;
     int32_t team, viewbob, weaponsway, althud, weaponscale, textscale;
@@ -415,6 +418,9 @@ void G_PrintGameQuotes(int32_t snum);
 void G_SetCrosshairColor(int32_t r,int32_t g,int32_t b);
 void G_Shutdown(void);
 void G_UpdatePlayerFromMenu(void);
+#ifdef DUKEVR_OPENXR
+int DukeVRHudRepositionPreviewActive(void);
+#endif
 void M32RunScript(const char *s);
 void P_DoQuote(int32_t q,DukePlayer_t *p);
 void P_SetGamePalette(DukePlayer_t *player, uint32_t palid, int32_t set);

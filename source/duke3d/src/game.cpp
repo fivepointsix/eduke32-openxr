@@ -32,6 +32,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include "demo.h"
 #include "duke3d.h"
 #include "input.h"
+#include "config.h"
 #include "menus.h"
 #include "microprofile.h"
 //#include "minicoro.h"
@@ -4702,6 +4703,7 @@ void G_HandleLocalKeys(void)
             }
 
             G_UpdateScreenArea();
+            CONFIG_SaveVRHudSettings();
         }
 
         if (BUTTON(gamefunc_Shrink_Screen))
@@ -4728,6 +4730,7 @@ void G_HandleLocalKeys(void)
             }
 
             G_UpdateScreenArea();
+            CONFIG_SaveVRHudSettings();
         }
     }
 
@@ -6718,6 +6721,99 @@ static void DukeVRApplyPlayerView(DukePlayer_t *p, int eye,
     }
 }
 
+enum DukeVRHudRepositionMode {
+    DUKEVR_HUD_REPOSITION_NONE = 0,
+    DUKEVR_HUD_REPOSITION_WEAPON,
+    DUKEVR_HUD_REPOSITION_STATUSBAR,
+};
+
+static int dukeVrHudRepositionPreview;
+
+int DukeVRHudRepositionPreviewActive(void)
+{
+    return dukeVrHudRepositionPreview;
+}
+
+static void DukeVRUpdateHudReposition(void)
+{
+    static int activeMode = DUKEVR_HUD_REPOSITION_NONE;
+    static int dragHand = -1;
+    static int dragging = 0;
+    static float grabPosition[3];
+    static int grabOffsetX;
+    static int grabOffsetY;
+    int mode = DUKEVR_HUD_REPOSITION_NONE;
+
+    if (g_currentMenu == MENU_VRHUDWEAPON)
+        mode = DUKEVR_HUD_REPOSITION_WEAPON;
+    else if (g_currentMenu == MENU_VRHUDSTATUSBAR)
+        mode = DUKEVR_HUD_REPOSITION_STATUSBAR;
+
+    if (mode != activeMode) {
+        if (dragging)
+            CONFIG_WriteSetup(0);
+        activeMode = mode;
+        dragHand = -1;
+        dragging = 0;
+        dukeVrHudRepositionPreview = 0;
+    }
+
+    if (mode == DUKEVR_HUD_REPOSITION_NONE)
+        return;
+
+    if (dragging) {
+        float position[3];
+        float orientation[4];
+        int grip = 0;
+        if (dragHand < 0 || !DukeVROpenXR_GetControllerPose(dragHand, position,
+                orientation, &grip))
+            return;
+        if (!grip) {
+            dragging = 0;
+            dragHand = -1;
+            dukeVrHudRepositionPreview = 0;
+            CONFIG_WriteSetup(0);
+            return;
+        }
+
+        int *offsetX = mode == DUKEVR_HUD_REPOSITION_WEAPON
+            ? &ud.vr_weapon_offset_x : &ud.vr_statusbar_offset_x;
+        int *offsetY = mode == DUKEVR_HUD_REPOSITION_WEAPON
+            ? &ud.vr_weapon_offset_y : &ud.vr_statusbar_offset_y;
+        /* 800 logical HUD pixels per metre is a deliberately conservative
+         * first-pass mapping. The values remain in Build's flat 320x200
+         * coordinate system, so the result is independent of headset FOV. */
+        *offsetX = clamp(grabOffsetX + (int)floorf((position[0] - grabPosition[0]) * 800.f +
+            ((position[0] >= grabPosition[0]) ? .5f : -.5f)), -160, 160);
+        *offsetY = clamp(grabOffsetY - (int)floorf((position[1] - grabPosition[1]) * 800.f +
+            ((position[1] >= grabPosition[1]) ? .5f : -.5f)), -100, 100);
+        return;
+    }
+
+    for (int hand = 1; hand >= 0; hand--) {
+        float position[3];
+        float orientation[4];
+        int grip = 0;
+        if (!DukeVROpenXR_GetControllerPose(hand, position, orientation, &grip) || !grip)
+            continue;
+
+        dragHand = hand;
+        dragging = 1;
+        dukeVrHudRepositionPreview = 1;
+        grabPosition[0] = position[0];
+        grabPosition[1] = position[1];
+        grabPosition[2] = position[2];
+        if (mode == DUKEVR_HUD_REPOSITION_WEAPON) {
+            grabOffsetX = ud.vr_weapon_offset_x;
+            grabOffsetY = ud.vr_weapon_offset_y;
+        } else {
+            grabOffsetX = ud.vr_statusbar_offset_x;
+            grabOffsetY = ud.vr_statusbar_offset_y;
+        }
+        break;
+    }
+}
+
 static int DukeVRIsInGameMenu(MenuID_t menu)
 {
     /* Every menu opened from a live mission belongs on the head-locked HUD.
@@ -6768,7 +6864,14 @@ static int DukeVRRenderStereoFrame(int smoothratio)
         DukeVROpenXR_EndFrame();
         return 0;
     }
-    DukeVROpenXR_SetHudMenuScale(inGameMenu);
+    DukeVRUpdateHudReposition();
+    /* A calibration page is normally an in-game menu and therefore uses the
+     * established smaller menu/HUD presentation. While grip is held, the
+     * menu overlay is suppressed and the live HUD must return to its normal
+     * gameplay scale so it can be positioned against the actual mission view. */
+    DukeVROpenXR_SetHudMenuScale(inGameMenu && !DukeVRHudRepositionPreviewActive());
+    DukeVROpenXR_SetHudLayerOffsets(ud.vr_weapon_offset_x, ud.vr_weapon_offset_y,
+        ud.vr_statusbar_offset_x, ud.vr_statusbar_offset_y);
     DukeVROpenXR_SetRenderOrientationResidual(0.f, 0.f, 0.f);
     DukeVROpenXR_SetRenderPositionResidual(0.f, 0.f, 0.f);
 
@@ -6910,6 +7013,12 @@ void drawframe_do(void)
 
     if (!g_saveRequested)
     {
+#ifdef DUKEVR_OPENXR
+        /* Synchronize OpenXR actions before Duke samples CONTROL input. The
+         * renderer reuses this same active frame later in drawframe_do(), so
+         * controller input and stereo rendering stay on the same prediction. */
+        DukeVROpenXR_PrepareInput();
+#endif
         // only allow binds to function if the player is actually in a game (not in a menu, typing, et cetera) or demo
         CONTROL_BindsEnabled = !!(g_player[myconnectindex].ps->gm & (MODE_GAME | MODE_DEMO));
 
@@ -6930,6 +7039,7 @@ void drawframe_do(void)
 #ifdef DUKEVR_OPENXR
     static int loggedGameplayState;
     static int dukeVrTestMenuState;
+    static int dukeVrTestStatusPersistenceState;
     DukePlayer_t *framePlayer = (screenpeek >= 0 && screenpeek < MAXPLAYERS) ? g_player[screenpeek].ps : nullptr;
     if (!loggedGameplayState && framePlayer && (framePlayer->gm & MODE_GAME) && !(framePlayer->gm & MODE_MENU))
     {
@@ -6961,6 +7071,31 @@ void drawframe_do(void)
             else
                 dukeVrTestMenuState = -1;
         }
+    }
+
+    /* Test-only persistence hook. This deliberately uses the same state
+     * variables as the +/- and Shift+/- handlers, then writes them through
+     * the normal VR configuration path. The PowerShell harness launches a
+     * second process to verify that every field survives a restart. */
+    if (dukeVrTestStatusPersistenceState == 0 && framePlayer &&
+        (framePlayer->gm & MODE_GAME) && !(framePlayer->gm & MODE_MENU) &&
+        Bgetenv("DUKEVR_TEST_STATUS_PERSIST") != nullptr)
+    {
+        ud.vr_weapon_offset_x = 17;
+        ud.vr_weapon_offset_y = -9;
+        ud.vr_statusbar_offset_x = 13;
+        ud.vr_statusbar_offset_y = -7;
+        ud.screen_size = 4;
+        ud.statusbarscale = 100;
+        ud.statusbarmode = 1;
+        ud.althud = 1;
+        ud.statusbarcustom = 0;
+        G_SetViewportShrink(+4);
+        G_SetStatusBarScale(ud.statusbarscale - 5);
+        G_UpdateScreenArea();
+        CONFIG_SaveVRHudSettings();
+        CONFIG_WriteSetup(0);
+        dukeVrTestStatusPersistenceState = 1;
     }
     vrFrameRendered = DukeVRRenderStereoFrame(smoothratio);
 #endif

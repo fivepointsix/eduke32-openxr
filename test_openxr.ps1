@@ -10,6 +10,8 @@ param(
     [switch]$EnterMission,
     [switch]$StartMission,
     [switch]$TestBonusScreen,
+    [ValidateRange(0, 60)]
+    [int]$BonusHoldSeconds = 0,
     [switch]$TestStatusBarPersistence,
     [ValidateSet('None', 'Options', 'Quit')]
     [string]$InGameMenuAction = 'None',
@@ -215,6 +217,7 @@ for ($run = 1; $run -le $Repeat; $run++) {
     $reachedGameplay = $false
     $reachedStereoGameplay = $false
     $reachedBonusScreen = $false
+    $bonusHoldStart = $null
     $missionKeysSent = $false
     $statusPersistenceKeysSent = $false
     $statusPersistenceReady = -not $TestStatusBarPersistence
@@ -291,8 +294,19 @@ for ($run = 1; $run -le $Repeat; $run++) {
             }
 
             if ($TestBonusScreen -and $reachedBonusScreen) {
-                $status = 'ReachedBonusScreen'
-                break
+                if ($BonusHoldSeconds -le 0) {
+                    $status = 'ReachedBonusScreen'
+                    break
+                }
+
+                if ($null -eq $bonusHoldStart) {
+                    $bonusHoldStart = Get-Date
+                    Write-Host ("  Holding bonus screen for {0} seconds" -f $BonusHoldSeconds)
+                }
+                elseif (((Get-Date) - $bonusHoldStart).TotalSeconds -ge $BonusHoldSeconds) {
+                    $status = 'HeldBonusScreen'
+                    break
+                }
             }
 
             if ($InGameMenuAction -eq 'Options' -and $menuActionSent -and
@@ -311,7 +325,10 @@ for ($run = 1; $run -le $Repeat; $run++) {
                 -not $menuActionCompleted
             $waitingForStatusPersistence = $TestStatusBarPersistence -and
                 -not $statusPersistenceReady
-            $waitingForBonusScreen = $TestBonusScreen -and -not $reachedBonusScreen
+            $bonusStillHeld = $TestBonusScreen -and $BonusHoldSeconds -gt 0 -and
+                $null -ne $bonusHoldStart -and
+                (((Get-Date) - $bonusHoldStart).TotalSeconds -lt $BonusHoldSeconds)
+            $waitingForBonusScreen = $TestBonusScreen -and (-not $reachedBonusScreen -or $bonusStillHeld)
             if ($reachedGameplay -and -not $KeepRunning -and
                 -not $waitingForStereo -and -not $waitingForMenuAction -and
                 -not $waitingForStatusPersistence -and -not $waitingForBonusScreen) {
@@ -431,7 +448,7 @@ if ($TestStatusBarPersistence -and ($allResults | Where-Object { -not $_.statusP
 }
 
     if ($allResults | Where-Object {
-        $_.status -notin @('ReachedMainMenu', 'ExitedAfterMainMenu', 'ReachedGameplay', 'ExitedAfterGameplay', 'ReachedBonusScreen', 'ReachedInGameOptions', 'ExitedAfterQuit') -or
+        $_.status -notin @('ReachedMainMenu', 'ExitedAfterMainMenu', 'ReachedGameplay', 'ExitedAfterGameplay', 'ReachedBonusScreen', 'HeldBonusScreen', 'ReachedInGameOptions', 'ExitedAfterQuit') -or
         ($_.status -eq 'ExitedAfterQuit' -and $_.exitCode -ne 0)
     }) {
     exit 1

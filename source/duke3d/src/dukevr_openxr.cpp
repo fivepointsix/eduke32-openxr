@@ -2170,6 +2170,8 @@ int DukeVROpenXR_SubmitDesktopFrame(int width, int height) {
     GLuint framebuffer = 0;
     GLint old_read = 0;
     GLint old_draw = 0;
+    GLint old_read_buffer = GL_BACK;
+    GLint old_draw_buffer = GL_BACK;
     int xr_width = 0;
     int xr_height = 0;
     int ok = 1;
@@ -2212,6 +2214,13 @@ int DukeVROpenXR_SubmitDesktopFrame(int width, int height) {
 
     glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &old_read);
     glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &old_draw);
+    /* Polymer and the OpenXR auxiliary targets use their own draw/read
+     * selections. Binding framebuffer 0 does not reliably restore the
+     * window back-buffer selection on all drivers, so make the source and
+     * destination buffers explicit for synchronous front-end screens such
+     * as the mission bonus screen. */
+    glGetIntegerv(GL_READ_BUFFER, &old_read_buffer);
+    glGetIntegerv(GL_DRAW_BUFFER, &old_draw_buffer);
     glGenFramebuffers(1, &framebuffer);
     if (framebuffer == 0) {
         LOG_F(ERROR, "OpenXR mono submit: glGenFramebuffers returned zero");
@@ -2225,10 +2234,12 @@ int DukeVROpenXR_SubmitDesktopFrame(int width, int height) {
         ok = 0;
     }
     glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+    glReadBuffer(GL_BACK);
     if (ok) {
         glBindFramebuffer(GL_DRAW_FRAMEBUFFER, framebuffer);
         glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
             GL_TEXTURE_2D, hud_texture, 0);
+        glDrawBuffer(GL_COLOR_ATTACHMENT0);
         if (glCheckFramebufferStatus(GL_DRAW_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
             LOG_F(ERROR, "OpenXR mono submit: HUD framebuffer incomplete");
             ok = 0;
@@ -2236,12 +2247,14 @@ int DukeVROpenXR_SubmitDesktopFrame(int width, int height) {
             glBlitFramebuffer(0, 0, width, height, 0, 0, xr_width, xr_height,
                 GL_COLOR_BUFFER_BIT, GL_LINEAR);
         }
+        glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+            GL_TEXTURE_2D, 0, 0);
     }
-    glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
-        GL_TEXTURE_2D, 0, 0);
     glDeleteFramebuffers(1, &framebuffer);
     glBindFramebuffer(GL_READ_FRAMEBUFFER, (GLuint)old_read);
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, (GLuint)old_draw);
+    glReadBuffer((GLenum)old_read_buffer);
+    glDrawBuffer((GLenum)old_draw_buffer);
 
     if (ok)
         glFlush();
@@ -2354,7 +2367,14 @@ void DukeVROpenXR_EndFrame(void) {
 
         memset(&hud_layer, 0, sizeof(hud_layer));
         hud_layer.type = XR_TYPE_COMPOSITION_LAYER_QUAD;
-        hud_layer.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
+        /* Mono front-end pages (title, menus, and the mission bonus screen)
+         * are copied from the desktop framebuffer. Build clears that buffer
+         * with alpha 0, so blending the copied page can leave its background
+         * transparent after returning from a stereo gameplay frame. Submit
+         * these pages as opaque quads; the live gameplay HUD still uses the
+         * original alpha-blended composition path below. */
+        hud_layer.layerFlags = gOpenXR.mono_quad_submitted
+            ? 0 : XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
         hud_layer.space = gOpenXR.view_space;
         hud_layer.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
         hud_layer.subImage.swapchain = gOpenXR.hud_swapchain;

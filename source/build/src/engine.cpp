@@ -2058,6 +2058,10 @@ static WSHELPER_DECL void calc_vplcinc(uint32_t *vplc, int32_t *vinc, const int3
 # endif
 #endif
 
+#ifdef DUKEVR_OPENXR
+# include "dukevr_openxr.h"
+#endif
+
 intptr_t tileLoadScaled(int const picnum, vec2_16_t *upscale/* = nullptr*/)
 {
     intptr_t bufplc;
@@ -12106,6 +12110,19 @@ void videoNextPage(void)
         videoEndDrawing();   //}}}
     }
 
+#ifdef DUKEVR_OPENXR
+    else if (DukeVROpenXR_Enabled())
+    {
+        /* Some synchronous front-end screens, notably the mission-complete
+         * screen, switch Build out of 3D mode before calling videoNextPage.
+         * They still render into the normal OpenGL desktop framebuffer, so
+         * send that page through the same mono OpenXR submission path as the
+         * title screen instead of leaving the headset on the previous frame. */
+        OSD_Draw();
+        videoShowFrame(0);
+    }
+#endif
+
     faketimerhandler();
     g_cache.ageBlocks();
 
@@ -13960,6 +13977,31 @@ void videoClearViewableArea(int32_t dacol)
 //
 void videoClearScreen(int32_t dacol)
 {
+#ifdef USE_OPENGL
+# ifdef DUKEVR_OPENXR
+    /* Once the gameplay frame has been closed, synchronous front-end screens
+     * must draw to the desktop back buffer regardless of Build's qsetmode.
+     * Otherwise the clear/draw can inherit an OpenXR scene target and the
+     * mono submission copies the last stereo image instead of this page. */
+    if (DukeVROpenXR_Enabled() && !DukeVROpenXR_FrameActive())
+    {
+        palette_t const p = paletteGetColor(dacol);
+
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        glReadBuffer(GL_BACK);
+        glDrawBuffer(GL_BACK);
+        glViewport(0, 0, xres, yres);
+        glClearColor((float)p.r * (1.f/255.f),
+                      (float)p.g * (1.f/255.f),
+                      (float)p.b * (1.f/255.f),
+                      0);
+        glClear(GL_COLOR_BUFFER_BIT);
+        polymost_resetState();
+        return;
+    }
+# endif
+#endif
+
     if (!in3dmode()) return;
     //dacol += (dacol<<8); dacol += (dacol<<16);
 

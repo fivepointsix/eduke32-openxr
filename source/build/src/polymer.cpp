@@ -1897,6 +1897,13 @@ static void         polymer_displayrooms(const int16_t dacursectnum)
     int16_t         *localsectormaskcount;
     int32_t         gx, gy, gz, px, py, pz;
     float           coeff;
+    GLint           saved_draw_framebuffer;
+    GLint           saved_read_framebuffer;
+
+    /* Mirror rendering uses an auxiliary framebuffer.  Restore the caller's
+     * target afterward; OpenXR's caller is an eye FBO, not framebuffer 0. */
+    glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &saved_draw_framebuffer);
+    glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &saved_read_framebuffer);
 
     curmodelviewmatrix = localmodelviewmatrix;
     glGetFloatv(GL_MODELVIEW_MATRIX, localmodelviewmatrix);
@@ -2221,7 +2228,8 @@ static void         polymer_displayrooms(const int16_t dacursectnum)
         glPopMatrix();
 
         glPopAttrib();
-        glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, 0);
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, (GLuint)saved_draw_framebuffer);
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, (GLuint)saved_read_framebuffer);
 
         mirrorlist[i].plane->material.mirrormap = prrts[0].color;
         polymer_drawplane(mirrorlist[i].plane);
@@ -6283,6 +6291,13 @@ static void         polymer_prepareshadows(void)
     // build globals used by drawmasks
     fix16_t oviewangle = viewangle;
     fix16_t oglobalang = qglobalang;
+    GLint saved_draw_framebuffer;
+    GLint saved_read_framebuffer;
+
+    /* Shadow maps are auxiliary targets too.  Keep the eye framebuffer bound
+     * when returning to the main scene. */
+    glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &saved_draw_framebuffer);
+    glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &saved_read_framebuffer);
 
     int i=0, j=0, k=0;
 
@@ -6339,7 +6354,8 @@ static void         polymer_prepareshadows(void)
             glPopMatrix();
 
             glPopAttrib();
-            glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, 0);
+            glBindFramebuffer(GL_DRAW_FRAMEBUFFER, (GLuint)saved_draw_framebuffer);
+            glBindFramebuffer(GL_READ_FRAMEBUFFER, (GLuint)saved_read_framebuffer);
 
             j++;
         }

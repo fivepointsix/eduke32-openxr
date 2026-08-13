@@ -980,6 +980,41 @@ static int polymer_set_openxr_projection(void)
     }
     return 1;
 }
+
+/* Polymer's mirror map is sampled with gl_FragCoord, so its render target
+ * must have the same dimensions and viewport as the scene currently being
+ * drawn.  The legacy renderer used xdim/ydim for both.  OpenXR renders into
+ * an intermediate eye target whose height follows the runtime eye aspect;
+ * leaving the mirror target at the desktop height makes the reflection map
+ * address the wrong pixels and produces a distance-dependent warp. */
+static void polymer_resize_openxr_mirrortarget(void)
+{
+    int mirror_width = xdim;
+    int mirror_height = ydim;
+    int scene_width, scene_height;
+
+    if (!DukeVROpenXR_FrameActive() || DukeVROpenXR_CurrentEye() < 0 ||
+        !DukeVROpenXR_GetSceneDimensions(&scene_width, &scene_height))
+        return;
+
+    mirror_width = scene_width;
+    mirror_height = scene_height;
+
+    if (prrts == nullptr || prrts[0].fbo == 0 ||
+        (prrts[0].xdim == mirror_width && prrts[0].ydim == mirror_height))
+        return;
+
+    buildgl_bindTexture(prrts[0].target, prrts[0].color);
+    glTexImage2D(prrts[0].target, 0, GL_RGB, mirror_width, mirror_height, 0,
+        GL_RGB, GL_SHORT, nullptr);
+    buildgl_bindTexture(prrts[0].target, prrts[0].z);
+    glTexImage2D(prrts[0].target, 0, GL_DEPTH_COMPONENT, mirror_width,
+        mirror_height, 0, GL_DEPTH_COMPONENT, GL_SHORT, nullptr);
+    buildgl_bindTexture(prrts[0].target, 0);
+
+    prrts[0].xdim = mirror_width;
+    prrts[0].ydim = mirror_height;
+}
 #endif
 
 void                polymer_glinit(void)
@@ -1160,6 +1195,7 @@ void polymer_drawrooms(int32_t daposx, int32_t daposy, int32_t daposz, fix16_t d
      * This must happen inside the renderer, after polymer_glinit(), because
      * the runtime provides a different asymmetric FOV for each eye. */
     polymer_set_openxr_projection();
+    polymer_resize_openxr_mirrortarget();
 #endif
 
     // TODO: support for screen resizing
@@ -2162,7 +2198,7 @@ static void         polymer_displayrooms(const int16_t dacursectnum)
     {
         glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, prrts[0].fbo);
         glPushAttrib(GL_VIEWPORT_BIT);
-        glViewport(windowxy1.x, ydim-(windowxy2.y+1),windowxy2.x-windowxy1.x+1, windowxy2.y-windowxy1.y+1);
+        glViewport(0, 0, prrts[0].xdim, prrts[0].ydim);
 
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 

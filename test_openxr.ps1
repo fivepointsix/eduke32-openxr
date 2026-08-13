@@ -9,6 +9,7 @@ param(
     [int]$Repeat = 1,
     [switch]$EnterMission,
     [switch]$StartMission,
+    [switch]$TestBonusScreen,
     [switch]$TestStatusBarPersistence,
     [ValidateSet('None', 'Options', 'Quit')]
     [string]$InGameMenuAction = 'None',
@@ -33,7 +34,7 @@ $executable = Join-Path $buildRoot 'eduke32.exe'
 $logFile = Join-Path $buildRoot 'eduke32.log'
 $resultsRoot = Join-Path $buildRoot 'test-results'
 $runtimeManifest = $null
-$needsMissionInput = $EnterMission -or $TestStatusBarPersistence
+$needsMissionInput = $EnterMission -or $TestBonusScreen -or $TestStatusBarPersistence
 $needsKeyboardInput = $needsMissionInput
 $runMission = $StartMission -or $needsMissionInput
 
@@ -45,6 +46,9 @@ if ($InGameMenuAction -ne 'None' -and $KeepRunning) {
 }
 if ($TestStatusBarPersistence -and $Mode -ne 'Desktop') {
     throw "-TestStatusBarPersistence currently requires -Mode Desktop."
+}
+if ($TestBonusScreen -and $InGameMenuAction -ne 'None') {
+    throw "-TestBonusScreen cannot be combined with -InGameMenuAction."
 }
 
 if ($Mode -eq 'OpenXR') {
@@ -195,6 +199,9 @@ for ($run = 1; $run -le $Repeat; $run++) {
     if ($TestStatusBarPersistence) {
         $startInfo.EnvironmentVariables['DUKEVR_TEST_STATUS_PERSIST'] = '1'
     }
+    if ($TestBonusScreen) {
+        $startInfo.EnvironmentVariables['DUKEVR_TEST_BONUS'] = '1'
+    }
 
     $process = New-Object Diagnostics.Process
     $process.StartInfo = $startInfo
@@ -207,6 +214,7 @@ for ($run = 1; $run -le $Repeat; $run++) {
     $reachedMenu = $false
     $reachedGameplay = $false
     $reachedStereoGameplay = $false
+    $reachedBonusScreen = $false
     $missionKeysSent = $false
     $statusPersistenceKeysSent = $false
     $statusPersistenceReady = -not $TestStatusBarPersistence
@@ -224,6 +232,7 @@ for ($run = 1; $run -le $Repeat; $run++) {
             $reachedMenu = $logText -match 'OpenXR main menu reached'
             $reachedGameplay = $logText -match 'OpenXR gameplay state reached|OpenXR stereo gameplay frame submitted'
             $reachedStereoGameplay = $logText -match 'OpenXR stereo gameplay frame submitted'
+            $reachedBonusScreen = $logText -match 'OpenXR G_BonusScreen begin:'
             $reachedQuitMenu = $logText -match 'OpenXR menu state: menu=502'
             $xrRuntimeInitialized = $logText -match 'OpenXR runtime initialized:'
             $xrGraphicsInitialized = $logText -match 'OpenXR graphics initialized:'
@@ -281,6 +290,11 @@ for ($run = 1; $run -le $Repeat; $run++) {
                 }
             }
 
+            if ($TestBonusScreen -and $reachedBonusScreen) {
+                $status = 'ReachedBonusScreen'
+                break
+            }
+
             if ($InGameMenuAction -eq 'Options' -and $menuActionSent -and
                 $logText -match 'OpenXR menu state: menu=202') {
                 $menuActionCompleted = $true
@@ -297,9 +311,10 @@ for ($run = 1; $run -le $Repeat; $run++) {
                 -not $menuActionCompleted
             $waitingForStatusPersistence = $TestStatusBarPersistence -and
                 -not $statusPersistenceReady
+            $waitingForBonusScreen = $TestBonusScreen -and -not $reachedBonusScreen
             if ($reachedGameplay -and -not $KeepRunning -and
                 -not $waitingForStereo -and -not $waitingForMenuAction -and
-                -not $waitingForStatusPersistence) {
+                -not $waitingForStatusPersistence -and -not $waitingForBonusScreen) {
                 if ($Mode -eq 'OpenXR' -and (-not $xrRuntimeInitialized -or -not $xrGraphicsInitialized)) {
                     $status = 'ReachedGameplayWithoutXR'
                 }
@@ -388,6 +403,7 @@ for ($run = 1; $run -le $Repeat; $run++) {
         reachedMainMenu = $reachedMenu
         reachedGameplay = $reachedGameplay
         reachedStereoGameplay = $reachedStereoGameplay
+        reachedBonusScreen = $reachedBonusScreen
         reachedQuitMenu = $reachedQuitMenu
         statusPersistenceReady = $statusPersistenceReady
         inGameMenuAction = $InGameMenuAction
@@ -415,7 +431,7 @@ if ($TestStatusBarPersistence -and ($allResults | Where-Object { -not $_.statusP
 }
 
     if ($allResults | Where-Object {
-        $_.status -notin @('ReachedMainMenu', 'ExitedAfterMainMenu', 'ReachedGameplay', 'ExitedAfterGameplay', 'ReachedInGameOptions', 'ExitedAfterQuit') -or
+        $_.status -notin @('ReachedMainMenu', 'ExitedAfterMainMenu', 'ReachedGameplay', 'ExitedAfterGameplay', 'ReachedBonusScreen', 'ReachedInGameOptions', 'ExitedAfterQuit') -or
         ($_.status -eq 'ExitedAfterQuit' -and $_.exitCode -ne 0)
     }) {
     exit 1

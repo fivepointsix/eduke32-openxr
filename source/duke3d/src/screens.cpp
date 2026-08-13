@@ -2333,6 +2333,20 @@ void G_BonusScreen(int32_t bonusonly)
     if (g_networkMode == NET_DEDICATED_SERVER)
         return;
 
+#ifdef DUKEVR_OPENXR
+    /* G_EndOfLevel normally follows a stereo gameplay frame, but the bonus
+     * screen is a synchronous front-end screen rendered through videoNextPage
+     * rather than through DukeVRRenderStereoFrame().  Explicitly finish any
+     * frame left by the gameplay path so the first bonus-screen page is sent
+     * through the same mono/head-locked OpenXR path as the title screens. */
+    if (DukeVROpenXR_FrameActive())
+    {
+        LOG_F(INFO, "OpenXR: closing gameplay frame before bonus screen");
+        DukeVROpenXR_EndFrame();
+    }
+    LOG_F(INFO, "OpenXR G_BonusScreen begin: bonusonly=%d", bonusonly);
+#endif
+
     G_UpdateAppTitle();
 
     if (ud.volume_number == 0 && ud.last_level == 8 && boardfilename[0])

@@ -7040,6 +7040,7 @@ void drawframe_do(void)
     static int loggedGameplayState;
     static int dukeVrTestMenuState;
     static int dukeVrTestStatusPersistenceState;
+    static int dukeVrTestBonusState;
     DukePlayer_t *framePlayer = (screenpeek >= 0 && screenpeek < MAXPLAYERS) ? g_player[screenpeek].ps : nullptr;
     if (!loggedGameplayState && framePlayer && (framePlayer->gm & MODE_GAME) && !(framePlayer->gm & MODE_MENU))
     {
@@ -7096,6 +7097,18 @@ void drawframe_do(void)
         CONFIG_SaveVRHudSettings();
         CONFIG_WriteSetup(0);
         dukeVrTestStatusPersistenceState = 1;
+    }
+
+    /* Test-only level-end hook. Set MODE_EOL before the next rendered frame
+     * so the normal main-loop transition reaches G_EndOfLevel() and the real
+     * mission-success screen without requiring a completed playthrough. */
+    if (dukeVrTestBonusState == 0 && framePlayer &&
+        (framePlayer->gm & MODE_GAME) && !(framePlayer->gm & MODE_MENU) &&
+        Bgetenv("DUKEVR_TEST_BONUS") != nullptr)
+    {
+        framePlayer->gm |= MODE_EOL;
+        dukeVrTestBonusState = 1;
+        LOG_F(INFO, "OpenXR test: requesting mission-complete transition");
     }
     vrFrameRendered = DukeVRRenderStereoFrame(smoothratio);
 #endif

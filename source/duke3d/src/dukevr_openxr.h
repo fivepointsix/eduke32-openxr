@@ -3,6 +3,11 @@
 
 #include <stdint.h>
 
+/* OpenXR world render scale, expressed as a percentage of the desktop-sized
+ * intermediate eye target. It is exposed as the vr_render_scale console
+ * variable and deliberately does not change the desktop window resolution. */
+extern int g_dukeVrOpenXRRenderScale;
+
 /* The OpenXR bridge is deliberately small: BRender continues to own the
  * scene and its eye render targets, while this module owns only the runtime
  * session, frame timing, swapchain images, and submission. */

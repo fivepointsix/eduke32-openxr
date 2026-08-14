@@ -26,6 +26,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include "cmdline.h"
 #include "demo.h"  // g_firstDemoFile[]
 #include "duke3d.h"
+#include "dukevr_openxr.h"
 #include "menus.h"
 //#include "minicoro.h"
 #include "osdfuncs.h"
@@ -1718,6 +1719,7 @@ int32_t registerosdcommands(void)
         { "r_stacksize", "change frame drawing routine stack size", (void *)&g_frameStackSize, CVAR_INT|CVAR_FUNCPTR, DRAWFRAME_MIN_STACK_SIZE, DRAWFRAME_MAX_STACK_SIZE },
         { "r_rotatespritenowidescreen", "pass bit 1024 to all CON rotatesprite calls", (void *)&g_rotatespriteNoWidescreen, CVAR_BOOL|CVAR_FUNCPTR, 0, 1 },
         { "r_upscalefactor", "increase performance by rendering at upscalefactor less than the screen resolution and upscale to the full resolution in the software renderer", (void *)&ud.detail, CVAR_INT|CVAR_FUNCPTR, 1, 16 },
+        { "vr_render_scale", "OpenXR world render scale as a percentage of the desktop-sized eye target", (void *)&g_dukeVrOpenXRRenderScale, CVAR_INT, 25, 100 },
         { "r_precache", "precache art assets during level load" CVAR_BOOL_OPTSTR, (void *)&ud.config.useprecache, CVAR_BOOL, 0, 1 },
 
         { "r_ambientlight", "sets the global map light level",(void *)&r_ambientlight, CVAR_FLOAT|CVAR_FUNCPTR, 0, 10 },

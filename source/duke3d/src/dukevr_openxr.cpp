@@ -8,6 +8,8 @@
 #include "control.h"
 #include "function.h"
 
+int g_dukeVrOpenXRRenderScale = 100;
+
 #ifdef OPENXR
 
 #include "OVR_CAPI_GL.h"
@@ -41,6 +43,15 @@ typedef struct DukeVROVRSwapChain {
 
 #define DUKEVR_OPENXR_MAX_IMAGES 16
 #define DUKEVR_OPENXR_MOVABLE_LAYERS 2
+
+enum {
+    DUKEVR_OPENXR_TIMING_EYE_LEFT = 0,
+    DUKEVR_OPENXR_TIMING_EYE_RIGHT,
+    DUKEVR_OPENXR_TIMING_HUD,
+    DUKEVR_OPENXR_TIMING_BLIT,
+    DUKEVR_OPENXR_TIMING_END_FRAME,
+    DUKEVR_OPENXR_TIMING_COUNT
+};
 
 typedef struct {
     XrInstance instance;
@@ -122,12 +133,25 @@ typedef struct {
     int movable_swapchains_acquired[DUKEVR_OPENXR_MOVABLE_LAYERS];
     int movable_content_submitted[DUKEVR_OPENXR_MOVABLE_LAYERS];
     GLuint eye_fbos[2];
-    GLuint eye_depth[2];
+    GLuint mirror_fbo;
     GLuint scene_fbos[2];
     GLuint scene_textures[2];
     GLuint scene_depth[2];
     int scene_target_width;
     int scene_target_height;
+    int scene_copied[2];
+    int auxiliary_width;
+    int auxiliary_height;
+    int timing_enabled;
+    int gpu_query_slot;
+    int gpu_active_metric;
+    GLuint gpu_queries[DUKEVR_OPENXR_TIMING_COUNT][2];
+    uint64_t timing_frame_index;
+    uint64_t cpu_eye_start[2];
+    uint64_t cpu_hud_start;
+    uint64_t cpu_accum[DUKEVR_OPENXR_TIMING_COUNT];
+    uint64_t gpu_last[DUKEVR_OPENXR_TIMING_COUNT];
+    uint32_t timing_sample_count;
     GLuint hud_fbo;
     GLuint hud_texture;
     GLuint hud_depth;
@@ -174,6 +198,63 @@ extern volatile int32_t oculusUseMenuScaleForHUD;
 #endif
 
 static void OpenXRAbortFrame(void);
+
+static void OpenXRGpuQueryBegin(int metric) {
+    if (!gOpenXR.timing_enabled || metric < 0 || metric >= DUKEVR_OPENXR_TIMING_COUNT ||
+        gOpenXR.gpu_active_metric >= 0 || glBeginQuery == NULL)
+        return;
+    if (gOpenXR.gpu_queries[metric][gOpenXR.gpu_query_slot] == 0)
+        return;
+    glBeginQuery(GL_TIME_ELAPSED, gOpenXR.gpu_queries[metric][gOpenXR.gpu_query_slot]);
+    gOpenXR.gpu_active_metric = metric;
+}
+
+static void OpenXRGpuQueryEnd(void) {
+    if (!gOpenXR.timing_enabled || gOpenXR.gpu_active_metric < 0 || glEndQuery == NULL)
+        return;
+    glEndQuery(GL_TIME_ELAPSED);
+    gOpenXR.gpu_active_metric = -1;
+}
+
+static void OpenXRCollectGpuQueries(int slot) {
+    int metric;
+    if (!gOpenXR.timing_enabled || glGetQueryObjectiv == NULL ||
+        glGetQueryObjectui64v == NULL)
+        return;
+    for (metric = 0; metric < DUKEVR_OPENXR_TIMING_COUNT; ++metric) {
+        GLint available = 0;
+        GLuint query = gOpenXR.gpu_queries[metric][slot];
+        if (query == 0)
+            continue;
+        glGetQueryObjectiv(query, GL_QUERY_RESULT_AVAILABLE, &available);
+        if (available) {
+            GLuint64 elapsed = 0;
+            glGetQueryObjectui64v(query, GL_QUERY_RESULT, &elapsed);
+            gOpenXR.gpu_last[metric] = (uint64_t)elapsed;
+        }
+    }
+}
+
+static void OpenXRTimingLog(void) {
+    uint32_t samples;
+    if (!gOpenXR.timing_enabled || gOpenXR.timing_sample_count < 60)
+        return;
+    samples = gOpenXR.timing_sample_count;
+    LOG_F(INFO, "OpenXR timing avg/%u: CPU eye=%0.3f/%0.3f HUD=%0.3f blit=%0.3f xrEndFrame=%0.3f ms; GPU eye=%0.3f/%0.3f HUD=%0.3f blit=%0.3f end=%0.3f ms",
+        samples,
+        (double)gOpenXR.cpu_accum[DUKEVR_OPENXR_TIMING_EYE_LEFT] / samples / 1000000.0,
+        (double)gOpenXR.cpu_accum[DUKEVR_OPENXR_TIMING_EYE_RIGHT] / samples / 1000000.0,
+        (double)gOpenXR.cpu_accum[DUKEVR_OPENXR_TIMING_HUD] / samples / 1000000.0,
+        (double)gOpenXR.cpu_accum[DUKEVR_OPENXR_TIMING_BLIT] / samples / 1000000.0,
+        (double)gOpenXR.cpu_accum[DUKEVR_OPENXR_TIMING_END_FRAME] / samples / 1000000.0,
+        (double)gOpenXR.gpu_last[DUKEVR_OPENXR_TIMING_EYE_LEFT] / 1000000.0,
+        (double)gOpenXR.gpu_last[DUKEVR_OPENXR_TIMING_EYE_RIGHT] / 1000000.0,
+        (double)gOpenXR.gpu_last[DUKEVR_OPENXR_TIMING_HUD] / 1000000.0,
+        (double)gOpenXR.gpu_last[DUKEVR_OPENXR_TIMING_BLIT] / 1000000.0,
+        (double)gOpenXR.gpu_last[DUKEVR_OPENXR_TIMING_END_FRAME] / 1000000.0);
+    memset(gOpenXR.cpu_accum, 0, sizeof(gOpenXR.cpu_accum));
+    gOpenXR.timing_sample_count = 0;
+}
 
 static void OpenXRReleaseSceneTargets(void) {
     if (gOpenXR.scene_fbos[0] != 0 || gOpenXR.scene_fbos[1] != 0)
@@ -263,6 +344,7 @@ static void OpenXRReset(void) {
         gOpenXR.movable_swapchains[i] = XR_NULL_HANDLE;
     gOpenXR.session_state = XR_SESSION_STATE_UNKNOWN;
     gOpenXR.current_eye = -1;
+    gOpenXR.gpu_active_metric = -1;
     gOpenXR.eye_offset_x[0] = -0.032f;
     gOpenXR.eye_offset_x[1] =  0.032f;
 }
@@ -293,10 +375,13 @@ static void OpenXRReleaseGraphics(void) {
     OpenXRReleaseMovableTargets();
     if (gOpenXR.eye_fbos[0] != 0 || gOpenXR.eye_fbos[1] != 0)
         glDeleteFramebuffers(2, gOpenXR.eye_fbos);
-    if (gOpenXR.eye_depth[0] != 0 || gOpenXR.eye_depth[1] != 0)
-        glDeleteRenderbuffers(2, gOpenXR.eye_depth);
+    if (gOpenXR.mirror_fbo != 0)
+        glDeleteFramebuffers(1, &gOpenXR.mirror_fbo);
+    if (gOpenXR.timing_enabled && glDeleteQueries != NULL)
+        glDeleteQueries(DUKEVR_OPENXR_TIMING_COUNT * 2, &gOpenXR.gpu_queries[0][0]);
     gOpenXR.eye_fbos[0] = gOpenXR.eye_fbos[1] = 0;
-    gOpenXR.eye_depth[0] = gOpenXR.eye_depth[1] = 0;
+    gOpenXR.mirror_fbo = 0;
+    memset(gOpenXR.gpu_queries, 0, sizeof(gOpenXR.gpu_queries));
     for (i = 0; i < 2; i++) {
         if (gOpenXR.swapchains[i] != XR_NULL_HANDLE)
             xrDestroySwapchain(gOpenXR.swapchains[i]);
@@ -1040,8 +1125,8 @@ static int OpenXRCreateHudSwapchain(void) {
     create_info.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT |
         XR_SWAPCHAIN_USAGE_SAMPLED_BIT;
     create_info.sampleCount = 1;
-    create_info.width = gOpenXR.config_views[0].recommendedImageRectWidth;
-    create_info.height = gOpenXR.config_views[0].recommendedImageRectHeight;
+    create_info.width = gOpenXR.auxiliary_width;
+    create_info.height = gOpenXR.auxiliary_height;
     create_info.faceCount = 1;
     create_info.arraySize = 1;
     create_info.mipCount = 1;
@@ -1117,8 +1202,8 @@ static int OpenXRCreateMovableSwapchain(int layer) {
     create_info.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT |
         XR_SWAPCHAIN_USAGE_SAMPLED_BIT;
     create_info.sampleCount = 1;
-    create_info.width = gOpenXR.config_views[0].recommendedImageRectWidth;
-    create_info.height = gOpenXR.config_views[0].recommendedImageRectHeight;
+    create_info.width = gOpenXR.auxiliary_width;
+    create_info.height = gOpenXR.auxiliary_height;
     create_info.faceCount = 1;
     create_info.arraySize = 1;
     create_info.mipCount = 1;
@@ -1176,6 +1261,20 @@ static int DukeVROpenXR_InitializeGraphics(void) {
         initprintf("OpenXR: deferring graphics session until the OpenGL context exists");
         return 0;
     }
+    gOpenXR.timing_enabled = getenv("OPENXR_TIMING") != NULL &&
+        glGenQueries != NULL && glBeginQuery != NULL && glEndQuery != NULL &&
+        glGetQueryObjectiv != NULL && glGetQueryObjectui64v != NULL;
+    if (gOpenXR.timing_enabled) {
+        glGenQueries(DUKEVR_OPENXR_TIMING_COUNT * 2, &gOpenXR.gpu_queries[0][0]);
+        if (gOpenXR.gpu_queries[0][0] == 0 ||
+            gOpenXR.gpu_queries[DUKEVR_OPENXR_TIMING_COUNT - 1][1] == 0) {
+            if (glDeleteQueries != NULL)
+                glDeleteQueries(DUKEVR_OPENXR_TIMING_COUNT * 2, &gOpenXR.gpu_queries[0][0]);
+            memset(gOpenXR.gpu_queries, 0, sizeof(gOpenXR.gpu_queries));
+            gOpenXR.timing_enabled = 0;
+        } else
+            initprintf("OpenXR: optional CPU/GPU timing instrumentation enabled");
+    }
 
     memset(&session_info, 0, sizeof(session_info));
     session_info.type = XR_TYPE_SESSION_CREATE_INFO;
@@ -1227,6 +1326,22 @@ static int DukeVROpenXR_InitializeGraphics(void) {
         OpenXRReleaseGraphics();
         return 0;
     }
+    gOpenXR.auxiliary_width = xdim > 0 ? xdim :
+        (int)gOpenXR.config_views[0].recommendedImageRectWidth;
+    gOpenXR.auxiliary_height = ydim > 0 ? ydim :
+        (int)gOpenXR.config_views[0].recommendedImageRectHeight;
+    if (gOpenXR.auxiliary_width <= 0)
+        gOpenXR.auxiliary_width = 1;
+    if (gOpenXR.auxiliary_height <= 0)
+        gOpenXR.auxiliary_height = 1;
+    if (gOpenXR.config_views[0].maxImageRectWidth > 0 &&
+        gOpenXR.auxiliary_width > (int)gOpenXR.config_views[0].maxImageRectWidth)
+        gOpenXR.auxiliary_width = gOpenXR.config_views[0].maxImageRectWidth;
+    if (gOpenXR.config_views[0].maxImageRectHeight > 0 &&
+        gOpenXR.auxiliary_height > (int)gOpenXR.config_views[0].maxImageRectHeight)
+        gOpenXR.auxiliary_height = gOpenXR.config_views[0].maxImageRectHeight;
+    initprintf("OpenXR: auxiliary layers %dx%d", gOpenXR.auxiliary_width,
+        gOpenXR.auxiliary_height);
     if (!OpenXRCreateSwapchain(0) || !OpenXRCreateSwapchain(1) ||
         !OpenXRCreateHudSwapchain() || !OpenXRCreateMovableSwapchain(0) ||
         !OpenXRCreateMovableSwapchain(1)) {
@@ -1235,12 +1350,14 @@ static int DukeVROpenXR_InitializeGraphics(void) {
     }
 
     gOpenXR.graphics_initialized = 1;
-    initprintf("OpenXR: graphics initialized (%ux%u per eye)",
+    initprintf("OpenXR: graphics initialized (%ux%u per eye, scene scale=%d%%, auxiliary=%dx%d)",
         gOpenXR.config_views[0].recommendedImageRectWidth,
-        gOpenXR.config_views[0].recommendedImageRectHeight);
-    LOG_F(INFO, "OpenXR graphics initialized: %ux%u per eye",
+        gOpenXR.config_views[0].recommendedImageRectHeight,
+        g_dukeVrOpenXRRenderScale, gOpenXR.auxiliary_width, gOpenXR.auxiliary_height);
+    LOG_F(INFO, "OpenXR graphics initialized: %ux%u per eye, scene scale=%d%%, auxiliary=%dx%d",
         gOpenXR.config_views[0].recommendedImageRectWidth,
-        gOpenXR.config_views[0].recommendedImageRectHeight);
+        gOpenXR.config_views[0].recommendedImageRectHeight,
+        g_dukeVrOpenXRRenderScale, gOpenXR.auxiliary_width, gOpenXR.auxiliary_height);
 
     /* The XR runtime is now the frame pacer.  The mirror window uses a
      * custom size and therefore has no meaningful desktop refresh rate;
@@ -1259,6 +1376,7 @@ static void OpenXRAbortFrame(void) {
     XrFrameEndInfo end_info;
     uint32_t i;
 
+    OpenXRGpuQueryEnd();
     if (gOpenXR.eye_render_active)
         DukeVROpenXR_EndEyeRender();
 
@@ -1294,6 +1412,7 @@ static void OpenXRAbortFrame(void) {
     gOpenXR.frame_active = 0;
     gOpenXR.scene_frame_submitted = 0;
     gOpenXR.mono_frame_submitted = 0;
+    gOpenXR.scene_copied[0] = gOpenXR.scene_copied[1] = 0;
 }
 
 int DukeVROpenXR_Initialize(void) {
@@ -1583,6 +1702,10 @@ int DukeVROpenXR_BeginFrame(void) {
         }
     }
     gOpenXR.frame_active = 1;
+    if (gOpenXR.timing_enabled) {
+        gOpenXR.gpu_query_slot = (int)(gOpenXR.timing_frame_index++ & 1);
+        OpenXRCollectGpuQueries(gOpenXR.gpu_query_slot ^ 1);
+    }
 #ifdef POLYMER
     OpenXRApplyRendererFov();
 #endif
@@ -1871,13 +1994,21 @@ int DukeVROpenXR_BeginEyeRender(int eye) {
     GLuint texture;
     int width = 0, height = 0;
     int scene_width, scene_height;
+    int render_scale;
 
     if (!gOpenXR.frame_active || eye < 0 || eye > 1 || gOpenXR.eye_render_active)
         return 0;
     texture = DukeVROpenXR_GetEyeTexture(eye);
     if (!texture || !DukeVROpenXR_GetEyeDimensions(eye, &width, &height))
         return 0;
-    scene_width = xdim;
+    render_scale = g_dukeVrOpenXRRenderScale;
+    if (render_scale < 25)
+        render_scale = 25;
+    else if (render_scale > 100)
+        render_scale = 100;
+    scene_width = (xdim * render_scale + 50) / 100;
+    if (scene_width < 1)
+        scene_width = 1;
     scene_height = (int)((float)scene_width * (float)height / (float)width + .5f);
     if (scene_height < 1)
         scene_height = 1;
@@ -1885,16 +2016,12 @@ int DukeVROpenXR_BeginEyeRender(int eye) {
         return 0;
     if (gOpenXR.eye_fbos[eye] == 0)
         glGenFramebuffers(1, &gOpenXR.eye_fbos[eye]);
-    if (gOpenXR.eye_depth[eye] == 0)
-        glGenRenderbuffers(1, &gOpenXR.eye_depth[eye]);
-    if (gOpenXR.eye_fbos[eye] == 0 || gOpenXR.eye_depth[eye] == 0)
+    if (gOpenXR.eye_fbos[eye] == 0)
         return 0;
 
     glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &gOpenXR.saved_draw_framebuffer);
     glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &gOpenXR.saved_read_framebuffer);
     glGetIntegerv(GL_VIEWPORT, gOpenXR.saved_viewport);
-    glBindRenderbuffer(GL_RENDERBUFFER, gOpenXR.eye_depth[eye]);
-    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, width, height);
     glBindFramebuffer(GL_FRAMEBUFFER, gOpenXR.scene_fbos[eye]);
     if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
     {
@@ -1905,6 +2032,12 @@ int DukeVROpenXR_BeginEyeRender(int eye) {
     glViewport(0, 0, scene_width, scene_height);
     glClearColor(0.f, 0.f, 0.f, 1.f);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+    gOpenXR.scene_copied[eye] = 0;
+    if (gOpenXR.timing_enabled) {
+        gOpenXR.cpu_eye_start[eye] = timerGetNanoTicks();
+        OpenXRGpuQueryBegin(eye == 0 ? DUKEVR_OPENXR_TIMING_EYE_LEFT :
+            DUKEVR_OPENXR_TIMING_EYE_RIGHT);
+    }
     gOpenXR.current_eye = eye;
     gOpenXR.eye_render_active = 1;
     return 1;
@@ -1918,6 +2051,11 @@ int DukeVROpenXR_BeginHudRender(void) {
         gOpenXR.hud_render_active || !OpenXREnsureHudTarget(width, height) ||
         !OpenXREnsureMovableTargets(width, height))
         return 0;
+    if (gOpenXR.timing_enabled) {
+        OpenXRGpuQueryEnd();
+        gOpenXR.cpu_hud_start = timerGetNanoTicks();
+        OpenXRGpuQueryBegin(DUKEVR_OPENXR_TIMING_HUD);
+    }
     glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &gOpenXR.saved_hud_draw_framebuffer);
     glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &gOpenXR.saved_hud_read_framebuffer);
     glGetIntegerv(GL_VIEWPORT, gOpenXR.saved_hud_viewport);
@@ -1977,7 +2115,9 @@ void DukeVROpenXR_EndHudRender(void) {
     if (gOpenXR.movable_render_active)
         DukeVROpenXR_EndHudLayer();
     texture = DukeVROpenXR_GetHudTexture();
-    if (texture != 0 && DukeVROpenXR_GetEyeDimensions(0, &width, &height)) {
+    width = gOpenXR.auxiliary_width;
+    height = gOpenXR.auxiliary_height;
+    if (texture != 0 && width > 0 && height > 0) {
         glBindFramebuffer(GL_READ_FRAMEBUFFER, gOpenXR.hud_fbo);
         glBindFramebuffer(GL_DRAW_FRAMEBUFFER, gOpenXR.hud_runtime_fbo);
         glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
@@ -2027,6 +2167,11 @@ void DukeVROpenXR_EndHudRender(void) {
     glBindFramebuffer(GL_READ_FRAMEBUFFER, (GLuint)gOpenXR.saved_hud_read_framebuffer);
     glViewport(gOpenXR.saved_hud_viewport[0], gOpenXR.saved_hud_viewport[1],
         gOpenXR.saved_hud_viewport[2], gOpenXR.saved_hud_viewport[3]);
+    if (gOpenXR.timing_enabled) {
+        OpenXRGpuQueryEnd();
+        gOpenXR.cpu_accum[DUKEVR_OPENXR_TIMING_HUD] +=
+            timerGetNanoTicks() - gOpenXR.cpu_hud_start;
+    }
     gOpenXR.hud_render_active = 0;
 }
 
@@ -2039,21 +2184,26 @@ static int OpenXRBlitSceneToEyeTexture(int eye) {
     GLuint texture;
     int width, height;
     GLenum status;
+    uint64_t cpu_start = 0;
     static int logged_error;
 
     if (eye < 0 || eye > 1 || gOpenXR.scene_fbos[eye] == 0)
         return 0;
+    if (gOpenXR.scene_copied[eye])
+        return 1;
     texture = DukeVROpenXR_GetEyeTexture(eye);
     if (texture == 0 || !DukeVROpenXR_GetEyeDimensions(eye, &width, &height))
         return 0;
+    if (gOpenXR.timing_enabled) {
+        cpu_start = timerGetNanoTicks();
+        OpenXRGpuQueryEnd();
+        OpenXRGpuQueryBegin(DUKEVR_OPENXR_TIMING_BLIT);
+    }
 
     glBindFramebuffer(GL_READ_FRAMEBUFFER, gOpenXR.scene_fbos[eye]);
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, gOpenXR.eye_fbos[eye]);
     glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
         GL_TEXTURE_2D, texture, 0);
-    glBindRenderbuffer(GL_RENDERBUFFER, gOpenXR.eye_depth[eye]);
-    glFramebufferRenderbuffer(GL_DRAW_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT,
-        GL_RENDERBUFFER, gOpenXR.eye_depth[eye]);
     status = glCheckFramebufferStatus(GL_DRAW_FRAMEBUFFER);
     if (status != GL_FRAMEBUFFER_COMPLETE) {
         if (!logged_error) {
@@ -2063,6 +2213,11 @@ static int OpenXRBlitSceneToEyeTexture(int eye) {
         }
         glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
             GL_TEXTURE_2D, 0, 0);
+        if (gOpenXR.timing_enabled) {
+            OpenXRGpuQueryEnd();
+            gOpenXR.cpu_accum[DUKEVR_OPENXR_TIMING_BLIT] +=
+                timerGetNanoTicks() - cpu_start;
+        }
         return 0;
     }
 
@@ -2074,12 +2229,23 @@ static int OpenXRBlitSceneToEyeTexture(int eye) {
     }
     glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
         GL_TEXTURE_2D, 0, 0);
+    if (gOpenXR.timing_enabled) {
+        OpenXRGpuQueryEnd();
+        gOpenXR.cpu_accum[DUKEVR_OPENXR_TIMING_BLIT] +=
+            timerGetNanoTicks() - cpu_start;
+    }
+    gOpenXR.scene_copied[eye] = 1;
     return 1;
 }
 
 void DukeVROpenXR_EndEyeRender(void) {
+    int eye;
+    uint64_t cpu_start;
     if (!gOpenXR.eye_render_active)
         return;
+    eye = gOpenXR.current_eye;
+    cpu_start = gOpenXR.cpu_eye_start[eye];
+    OpenXRGpuQueryEnd();
     OpenXRBlitSceneToEyeTexture(gOpenXR.current_eye);
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, (GLuint)gOpenXR.saved_draw_framebuffer);
     glBindFramebuffer(GL_READ_FRAMEBUFFER, (GLuint)gOpenXR.saved_read_framebuffer);
@@ -2087,6 +2253,9 @@ void DukeVROpenXR_EndEyeRender(void) {
         gOpenXR.saved_viewport[2], gOpenXR.saved_viewport[3]);
     gOpenXR.eye_render_active = 0;
     gOpenXR.current_eye = -1;
+    if (gOpenXR.timing_enabled && eye >= 0 && eye < 2)
+        gOpenXR.cpu_accum[eye == 0 ? DUKEVR_OPENXR_TIMING_EYE_LEFT :
+            DUKEVR_OPENXR_TIMING_EYE_RIGHT] += timerGetNanoTicks() - cpu_start;
 }
 
 int DukeVROpenXR_CurrentEye(void) {
@@ -2101,10 +2270,9 @@ int DukeVROpenXR_SceneFrameActive(void) {
  * useful while the headset receives the original per-eye projection layer. */
 int DukeVROpenXR_PresentMirror(int eye, int width, int height) {
     GLint old_draw, old_read;
-    GLuint framebuffer = 0;
     GLuint texture;
-    GLuint source_framebuffer;
     int xr_width, xr_height;
+    uint64_t mirror_cpu_start = 0;
 
     if (!gOpenXR.frame_active || eye < 0 || eye > 1 || width <= 0 || height <= 0 ||
         !DukeVROpenXR_GetEyeDimensions(eye, &xr_width, &xr_height))
@@ -2122,23 +2290,27 @@ int DukeVROpenXR_PresentMirror(int eye, int width, int height) {
     texture = DukeVROpenXR_GetEyeTexture(eye);
     if (!texture)
         return 0;
-    glGenFramebuffers(1, &framebuffer);
-    if (!framebuffer)
+    if (gOpenXR.mirror_fbo == 0)
+        glGenFramebuffers(1, &gOpenXR.mirror_fbo);
+    if (gOpenXR.mirror_fbo == 0)
         return 0;
-    source_framebuffer = framebuffer;
-    glBindFramebuffer(GL_READ_FRAMEBUFFER, source_framebuffer);
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, gOpenXR.mirror_fbo);
     glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, texture, 0);
-    glBindFramebuffer(GL_READ_FRAMEBUFFER, source_framebuffer);
     if (glCheckFramebufferStatus(GL_READ_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE)
     {
         glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+        if (gOpenXR.timing_enabled)
+            mirror_cpu_start = timerGetNanoTicks();
         glBlitFramebuffer(0, 0, xr_width, xr_height, 0, 0, width, height,
             GL_COLOR_BUFFER_BIT, GL_LINEAR);
+        if (gOpenXR.timing_enabled)
+            gOpenXR.cpu_accum[DUKEVR_OPENXR_TIMING_BLIT] +=
+                timerGetNanoTicks() - mirror_cpu_start;
     }
+    glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+        GL_TEXTURE_2D, 0, 0);
     glBindFramebuffer(GL_READ_FRAMEBUFFER, (GLuint)old_read);
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, (GLuint)old_draw);
-    if (framebuffer != 0)
-        glDeleteFramebuffers(1, &framebuffer);
     return 1;
 }
 
@@ -2201,8 +2373,9 @@ int DukeVROpenXR_SubmitDesktopFrame(int width, int height) {
         traceCount++;
     }
     DukeVROpenXR_MarkMonoFrame();
-    if (!DukeVROpenXR_GetEyeDimensions(0, &xr_width, &xr_height) ||
-        width <= 0 || height <= 0) {
+    xr_width = gOpenXR.auxiliary_width;
+    xr_height = gOpenXR.auxiliary_height;
+    if (xr_width <= 0 || xr_height <= 0 || width <= 0 || height <= 0) {
         DukeVROpenXR_EndFrame();
         return 0;
     }
@@ -2291,6 +2464,7 @@ void DukeVROpenXR_EndFrame(void) {
     const XrCompositionLayerBaseHeader* layers[2 + DUKEVR_OPENXR_MOVABLE_LAYERS];
     uint32_t layer_count = 0;
     uint32_t i;
+    uint64_t cpu_end_frame_start = 0;
 
     if (gOpenXR.eye_render_active)
         DukeVROpenXR_EndEyeRender();
@@ -2380,8 +2554,8 @@ void DukeVROpenXR_EndFrame(void) {
         hud_layer.subImage.swapchain = gOpenXR.hud_swapchain;
         hud_layer.subImage.imageRect.offset.x = 0;
         hud_layer.subImage.imageRect.offset.y = 0;
-        hud_layer.subImage.imageRect.extent.width = gOpenXR.config_views[0].recommendedImageRectWidth;
-        hud_layer.subImage.imageRect.extent.height = gOpenXR.config_views[0].recommendedImageRectHeight;
+        hud_layer.subImage.imageRect.extent.width = gOpenXR.auxiliary_width;
+        hud_layer.subImage.imageRect.extent.height = gOpenXR.auxiliary_height;
         hud_layer.subImage.imageArrayIndex = 0;
         hud_layer.pose.orientation.w = 1.0f;
         hud_layer.pose.position.z = -distance;
@@ -2463,7 +2637,12 @@ void DukeVROpenXR_EndFrame(void) {
     end_info.layerCount = layer_count;
     end_info.layers = layers;
 
+    if (gOpenXR.timing_enabled) {
+        cpu_end_frame_start = timerGetNanoTicks();
+        OpenXRGpuQueryBegin(DUKEVR_OPENXR_TIMING_END_FRAME);
+    }
     glFlush();
+    OpenXRGpuQueryEnd();
     for (i = 0; i < 2; i++) {
         XrSwapchainImageReleaseInfo release_info;
         memset(&release_info, 0, sizeof(release_info));
@@ -2490,12 +2669,19 @@ void DukeVROpenXR_EndFrame(void) {
         }
     }
     OpenXRResultOK(xrEndFrame(gOpenXR.session, &end_info), "xrEndFrame");
+    if (gOpenXR.timing_enabled) {
+        gOpenXR.cpu_accum[DUKEVR_OPENXR_TIMING_END_FRAME] +=
+            timerGetNanoTicks() - cpu_end_frame_start;
+        gOpenXR.timing_sample_count++;
+        OpenXRTimingLog();
+    }
     gOpenXR.frame_active = 0;
     gOpenXR.frame_begun = 0;
     /* This is per-frame state. Leaving it set makes the next mono/menu
      * presentation look like an in-progress stereo scene to winlayer. */
     gOpenXR.scene_frame_submitted = 0;
     gOpenXR.mono_frame_submitted = 0;
+    gOpenXR.scene_copied[0] = gOpenXR.scene_copied[1] = 0;
     gOpenXR.mono_quad_submitted = 0;
     gOpenXR.mono_source_width = 0;
     gOpenXR.mono_source_height = 0;

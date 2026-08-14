@@ -29,6 +29,9 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include "compat.h"
 #include "demo.h"
 #include "duke3d.h"
+#ifdef DUKEVR_OPENXR
+# include "dukevr_openxr.h"
+#endif
 #include "in_android.h"
 #include "input.h"
 #include "config.h"
@@ -725,6 +728,10 @@ static MenuLink_t MEO_DISPLAYSETUP_SCREENSETUP = { MENU_SCREENSETUP, MA_Advance,
 static MenuEntry_t ME_DISPLAYSETUP_SCREENSETUP = MAKE_MENUENTRY( "HUD setup", &MF_Redfont, &MEF_BigOptionsRt, &MEO_DISPLAYSETUP_SCREENSETUP, Link );
 
 #ifdef DUKEVR_OPENXR
+static char const *MEOSN_VR_DOLLHOUSE[] = { "Disabled", "1.5x", "2x", "2.5x", "3x", };
+static MenuOptionSet_t MEOS_VR_DOLLHOUSE = MAKE_MENUOPTIONSET( MEOSN_VR_DOLLHOUSE, NULL, 0x3 );
+static MenuOption_t MEO_VR_DOLLHOUSE = MAKE_MENUOPTION( &MF_Redfont, &MEOS_VR_DOLLHOUSE, &g_dukeVrOpenXRDollhouseEffect );
+static MenuEntry_t ME_VR_DOLLHOUSE = MAKE_MENUENTRY( "Dollhouse effect:", &MF_Redfont, &MEF_BigOptionsRt, &MEO_VR_DOLLHOUSE, Option );
 static MenuLink_t MEO_VRHUD_WEAPON = { MENU_VRHUDWEAPON, MA_Advance, };
 static MenuLink_t MEO_VRHUD_STATUSBAR = { MENU_VRHUDSTATUSBAR, MA_Advance, };
 static MenuLink_t MEO_VRHUD_RESET = { MENU_VRHUDRESETVERIFY, MA_None, };
@@ -734,7 +741,7 @@ static MenuEntry_t ME_VRHUD_RESET = MAKE_MENUENTRY( "Reset positions", &MF_Redfo
 static MenuEntry_t ME_VRHUD_WEAPON_INSTRUCTIONS = MAKE_MENUENTRY( "Hold grip and move controller", &MF_Minifont, &MEF_CenterMenu, &MEO_NULL, Dummy );
 static MenuEntry_t ME_VRHUD_STATUSBAR_INSTRUCTIONS = MAKE_MENUENTRY( "Hold grip and move controller", &MF_Minifont, &MEF_CenterMenu, &MEO_NULL, Dummy );
 static MenuEntry_t ME_VRHUD_EXIT_INSTRUCTIONS = MAKE_MENUENTRY( "Press back to finish", &MF_Minifont, &MEF_CenterMenu, &MEO_NULL, Dummy );
-static MenuEntry_t *MEL_VRHUDSETUP[] = { &ME_VRHUD_WEAPON, &ME_VRHUD_STATUSBAR, &ME_VRHUD_RESET, };
+static MenuEntry_t *MEL_VRHUDSETUP[] = { &ME_VR_DOLLHOUSE, &ME_VRHUD_WEAPON, &ME_VRHUD_STATUSBAR, &ME_VRHUD_RESET, };
 static MenuEntry_t *MEL_VRHUDWEAPON[] = { &ME_VRHUD_WEAPON_INSTRUCTIONS, &ME_VRHUD_EXIT_INSTRUCTIONS, };
 static MenuEntry_t *MEL_VRHUDSTATUSBAR[] = { &ME_VRHUD_STATUSBAR_INSTRUCTIONS, &ME_VRHUD_EXIT_INSTRUCTIONS, };
 #endif
@@ -1573,7 +1580,7 @@ static MenuMenu_t M_COLCORR = MAKE_MENUMENU( "Color Correction", &MMF_ColorCorre
 static MenuMenu_t M_SCREENSETUP = MAKE_MENUMENU( "HUD Setup", &MMF_BigOptions, MEL_SCREENSETUP );
 static MenuMenu_t M_DISPLAYSETUP = MAKE_MENUMENU( "Display Setup", &MMF_BigOptions, MEL_DISPLAYSETUP );
 #ifdef DUKEVR_OPENXR
-static MenuMenu_t M_VRHUDSETUP = MAKE_MENUMENU( "VR HUD Setup", &MMF_BigOptions, MEL_VRHUDSETUP );
+static MenuMenu_t M_VRHUDSETUP = MAKE_MENUMENU( "VR Options", &MMF_BigOptions, MEL_VRHUDSETUP );
 static MenuMenu_t M_VRHUDWEAPON = MAKE_MENUMENU( "Move Weapon", &MMF_BigOptions, MEL_VRHUDWEAPON );
 static MenuMenu_t M_VRHUDSTATUSBAR = MAKE_MENUMENU( "Move Status Bar", &MMF_BigOptions, MEL_VRHUDSTATUSBAR );
 #endif

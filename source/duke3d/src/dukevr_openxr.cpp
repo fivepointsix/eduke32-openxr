@@ -9,6 +9,7 @@
 #include "function.h"
 
 int g_dukeVrOpenXRRenderScale = 100;
+int g_dukeVrOpenXRDollhouseEffect = 0;
 
 #ifdef OPENXR
 

@@ -7,6 +7,7 @@
  * intermediate eye target. It is exposed as the vr_render_scale console
  * variable and deliberately does not change the desktop window resolution. */
 extern int g_dukeVrOpenXRRenderScale;
+extern int g_dukeVrOpenXRDollhouseEffect;
 
 /* The OpenXR bridge is deliberately small: BRender continues to own the
  * scene and its eye render targets, while this module owns only the runtime

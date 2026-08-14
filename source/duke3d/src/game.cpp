@@ -6666,6 +6666,17 @@ static void DukeVRApplyPlayerView(DukePlayer_t *p, int eye,
         eyeDeltaRaw[1] = eyePosition[eye][1] - (eyePosition[0][1] + eyePosition[1][1]) * .5f;
         eyeDeltaRaw[2] = eyePosition[eye][2] - (eyePosition[0][2] + eyePosition[1][2]) * .5f;
         DukeVRRecenterTrackingVector(eyeDeltaRaw, eyeDelta);
+        if (g_dukeVrOpenXRDollhouseEffect > 0) {
+            /* Keep the headset-centered camera fixed while increasing only
+             * the virtual inter-eye separation. This exaggerates parallax
+             * and produces the miniature/dollhouse scale effect without
+             * changing gameplay coordinates or head orientation. */
+            float const dollhouseScale = 1.f +
+                0.5f * (float)g_dukeVrOpenXRDollhouseEffect;
+            eyeDelta[0] *= dollhouseScale;
+            eyeDelta[1] *= dollhouseScale;
+            eyeDelta[2] *= dollhouseScale;
+        }
         float const lateral = eyeDelta[0] * 512.f;
         float const depth = -eyeDelta[2] * 512.f;
         float const centerLateral = center[0] * 512.f;

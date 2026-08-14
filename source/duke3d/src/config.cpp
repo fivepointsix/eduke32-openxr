@@ -26,6 +26,10 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include "renderlayer.h"
 #include "cmdline.h"
 
+#ifdef DUKEVR_OPENXR
+# include "dukevr_openxr.h"
+#endif
+
 #include "vfs.h"
 
 #ifdef __ANDROID__
@@ -798,11 +802,17 @@ int CONFIG_ReadSetup(void)
     SCRIPT_GetNumber(ud.config.scripthandle, "VR Setup", "StatusBarMode", &ud.statusbarmode);
     SCRIPT_GetNumber(ud.config.scripthandle, "VR Setup", "StatusBarAltHud", &ud.althud);
     SCRIPT_GetNumber(ud.config.scripthandle, "VR Setup", "StatusBarCustom", &ud.statusbarcustom);
+#ifdef DUKEVR_OPENXR
+    SCRIPT_GetNumber(ud.config.scripthandle, "VR Setup", "DollhouseEffect", &g_dukeVrOpenXRDollhouseEffect);
+#endif
     ud.screen_size = clamp(ud.screen_size, 0, 64);
     ud.statusbarscale = clamp(ud.statusbarscale, 50, 100);
     ud.statusbarmode = clamp(ud.statusbarmode, 0, 1);
     ud.althud = clamp(ud.althud, 0, 1);
     ud.statusbarcustom = max(ud.statusbarcustom, 0);
+#ifdef DUKEVR_OPENXR
+    g_dukeVrOpenXRDollhouseEffect = clamp(g_dukeVrOpenXRDollhouseEffect, 0, 4);
+#endif
     LOG_F(INFO, "Loaded VR HUD settings from %s: weapon=%d/%d status=%d/%d state=size:%d scale:%d mode:%d alt:%d custom:%d",
         g_setupFileName, ud.vr_weapon_offset_x, ud.vr_weapon_offset_y,
         ud.vr_statusbar_offset_x, ud.vr_statusbar_offset_y, ud.screen_size,
@@ -868,11 +878,17 @@ void CONFIG_ReadSettings(void)
         SCRIPT_GetNumber(ud.config.scripthandle, "VR Setup", "StatusBarMode", &ud.statusbarmode);
         SCRIPT_GetNumber(ud.config.scripthandle, "VR Setup", "StatusBarAltHud", &ud.althud);
         SCRIPT_GetNumber(ud.config.scripthandle, "VR Setup", "StatusBarCustom", &ud.statusbarcustom);
+#ifdef DUKEVR_OPENXR
+        SCRIPT_GetNumber(ud.config.scripthandle, "VR Setup", "DollhouseEffect", &g_dukeVrOpenXRDollhouseEffect);
+#endif
         ud.screen_size = clamp(ud.screen_size, 0, 64);
         ud.statusbarscale = clamp(ud.statusbarscale, 50, 100);
         ud.statusbarmode = clamp(ud.statusbarmode, 0, 1);
         ud.althud = clamp(ud.althud, 0, 1);
         ud.statusbarcustom = max(ud.statusbarcustom, 0);
+#ifdef DUKEVR_OPENXR
+        g_dukeVrOpenXRDollhouseEffect = clamp(g_dukeVrOpenXRDollhouseEffect, 0, 4);
+#endif
         G_UpdateScreenArea();
         LOG_F(INFO, "Applied VR HUD settings after settings.cfg: state=size:%d scale:%d mode:%d alt:%d custom:%d",
             ud.screen_size, ud.statusbarscale, ud.statusbarmode, ud.althud, ud.statusbarcustom);
@@ -911,6 +927,9 @@ void CONFIG_SaveVRHudSettings(void)
     SCRIPT_PutNumber(ud.config.scripthandle, "VR Setup", "StatusBarMode", ud.statusbarmode, FALSE, FALSE);
     SCRIPT_PutNumber(ud.config.scripthandle, "VR Setup", "StatusBarAltHud", ud.althud, FALSE, FALSE);
     SCRIPT_PutNumber(ud.config.scripthandle, "VR Setup", "StatusBarCustom", ud.statusbarcustom, FALSE, FALSE);
+#ifdef DUKEVR_OPENXR
+    SCRIPT_PutNumber(ud.config.scripthandle, "VR Setup", "DollhouseEffect", g_dukeVrOpenXRDollhouseEffect, FALSE, FALSE);
+#endif
     SCRIPT_Save(ud.config.scripthandle, g_setupFileName);
     /* Keep the standard cvars in settings.cfg synchronized too. Otherwise
      * an older r_size/hud_scale/hud_althud value remains on disk and can
@@ -1030,6 +1049,9 @@ void CONFIG_WriteSetup(uint32_t flags)
     SCRIPT_PutNumber(ud.config.scripthandle, "VR Setup", "StatusBarMode", ud.statusbarmode, FALSE, FALSE);
     SCRIPT_PutNumber(ud.config.scripthandle, "VR Setup", "StatusBarAltHud", ud.althud, FALSE, FALSE);
     SCRIPT_PutNumber(ud.config.scripthandle, "VR Setup", "StatusBarCustom", ud.statusbarcustom, FALSE, FALSE);
+#ifdef DUKEVR_OPENXR
+    SCRIPT_PutNumber(ud.config.scripthandle, "VR Setup", "DollhouseEffect", g_dukeVrOpenXRDollhouseEffect, FALSE, FALSE);
+#endif
 
     if (g_grpNamePtr && !g_addonNum)
         SCRIPT_PutString(ud.config.scripthandle, "Setup", "SelectedGRP", g_grpNamePtr);

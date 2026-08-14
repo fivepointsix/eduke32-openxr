@@ -45,6 +45,24 @@ registered location. No manual copying is needed in that case.
 For a portable installation, copy both `fury.grp` and `fury.grpinfo` beside
 `eduke32.exe`.
 
+## Performance
+
+SteamVR's render resolution and refresh rate have a large effect on
+performance, especially in Ion Fury. High SteamVR supersampling values create
+very large per-eye OpenXR render targets, while higher refresh rates give the
+game less time to render each frame.
+
+If performance is poor, use this troubleshooting baseline:
+
+1. Open the SteamVR dashboard and select **Settings** (the gear icon).
+2. Under **Video**, set **Render Resolution** to **Custom** and **100%**.
+3. Set the headset refresh rate to **90 Hz**, when that option is available.
+4. Restart SteamVR after changing the refresh rate.
+
+Once performance is stable, increase the resolution gradually if desired.
+Per-application video settings can be used to change the resolution for
+DukeVR without reducing it for other SteamVR applications.
+
 ## Build from source
 
 Build requirements:

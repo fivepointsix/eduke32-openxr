@@ -6478,6 +6478,12 @@ static float g_dukeVrTrackingOrientationOrigin[4];
 static float g_dukeVrTrackingYaw;
 static float g_dukeVrTrackingPitch;
 static float g_dukeVrTrackingRoll;
+static uint32_t g_dukeVrViewStateGeneration;
+
+void G_DukeVRNotifyGameLoaded(void)
+{
+    g_dukeVrViewStateGeneration++;
+}
 
 /* OpenXR LOCAL positions are expressed in the runtime's fixed room basis.
  * Legacy DukeVR recentered that basis before using eye/head translations.
@@ -6833,6 +6839,7 @@ static int DukeVRRenderStereoFrame(int smoothratio)
     DukePlayer_t *pPlayer = (screenpeek >= 0 && screenpeek < MAXPLAYERS) ? g_player[screenpeek].ps : nullptr;
     DukeVRPlayerViewState saved;
     int hudRendered = 0;
+    int viewStateChanged = 0;
 
     /* Front-end menus are still submitted as one mono desktop frame. The
      * in-game menu is different: legacy DukeVR kept the world stereo and
@@ -6920,12 +6927,14 @@ static int DukeVRRenderStereoFrame(int smoothratio)
     }
 
     DukeVRSavePlayerView(pPlayer, &saved);
+    uint32_t const viewStateGeneration = g_dukeVrViewStateGeneration;
     for (int eye = 0; eye < 2; eye++)
     {
         if (!DukeVROpenXR_BeginEyeRender(eye))
         {
             LOG_F(WARNING, "OpenXR stereo eye %d: BeginEyeRender failed", eye);
-            DukeVRRestorePlayerView(pPlayer, &saved);
+            if (!viewStateChanged)
+                DukeVRRestorePlayerView(pPlayer, &saved);
             DukeVROpenXR_EndFrame();
             return 0;
         }
@@ -6948,12 +6957,16 @@ static int DukeVRRenderStereoFrame(int smoothratio)
              * normal game view rather than silently dropping the interface. */
             G_DisplayRest(smoothratio);
         }
+        if (g_dukeVrViewStateGeneration != viewStateGeneration)
+            viewStateChanged = 1;
         DukeVROpenXR_MarkSceneFrame();
         videoNextPage();
         DukeVROpenXR_EndEyeRender();
-        DukeVRRestorePlayerView(pPlayer, &saved);
+        if (!viewStateChanged)
+            DukeVRRestorePlayerView(pPlayer, &saved);
     }
-    DukeVRRestorePlayerView(pPlayer, &saved);
+    if (!viewStateChanged)
+        DukeVRRestorePlayerView(pPlayer, &saved);
     DukeVROpenXR_EndFrame();
     {
         static int loggedGameplayFrame;

@@ -392,6 +392,9 @@ void A_SpawnRandomGlass(int spriteNum,int wallNum,int glassCnt);
 void A_SpawnWallGlass(int spriteNum,int wallnum,int glassCnt);
 void G_AddUserQuote(const char *daquote);
 void G_BackToMenu(void);
+#ifdef DUKEVR_OPENXR
+void G_DukeVRNotifyGameLoaded(void);
+#endif
 void G_DumpDebugInfo(void);
 
 const char* G_PrintYourTime(void);

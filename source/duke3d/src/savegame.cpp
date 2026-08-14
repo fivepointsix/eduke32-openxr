@@ -680,6 +680,10 @@ int32_t G_LoadPlayer(savebrief_t & sv)
         sv_update_app_title(mapidx);
         VM_OnEvent(EVENT_LOADGAME, g_player[screenpeek].ps->i, screenpeek);
 
+#ifdef DUKEVR_OPENXR
+        G_DukeVRNotifyGameLoaded();
+#endif
+
         return 0;
     }
 
@@ -767,6 +771,10 @@ int32_t G_LoadPlayer(savebrief_t & sv)
     sv_update_app_title(mapidx);
     VM_OnEvent(EVENT_LOADGAME, g_player[screenpeek].ps->i, screenpeek, -1, h.userbytever);
     kclose(fil);
+
+#ifdef DUKEVR_OPENXR
+    G_DukeVRNotifyGameLoaded();
+#endif
 
     return 0;
 }
